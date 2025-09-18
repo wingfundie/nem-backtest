@@ -5,8 +5,8 @@ Self-contained Carver-style optimizer that preserves YOUR original forecast func
 changes only scaling & capping, and performs correct position sizing / PnL / Sharpe.
 
 Method (per Carver):
-  1) For each rule variant (sub-forecast): scale so long-run |forecast| ≈ 10, then **cap to ±20**.
-  2) Combine sub-forecasts with non-negative weights (sum=1), then **cap combined forecast to ±20**.
+  1) For each rule variant (sub-forecast): scale so long-run |forecast| ~ 10, then **cap to +/-20**.
+  2) Combine sub-forecasts with non-negative weights (sum=1), then **cap combined forecast to +/-20**.
   3) Size positions with volatility targeting:
         position (blocks) = volatility_scalar * (combined_forecast / 10)
      where volatility_scalar = daily_cash_vol_target / instrument_value_daily_vol.
@@ -44,7 +44,9 @@ import importlib
 import inspect
 from contextlib import contextmanager
 import optuna
+
 BUSDAYS = 365
+
 
 # ---------- Try to resolve user-supplied forecast functions ----------
 def _try_resolve(name: str) -> Optional[Callable]:
@@ -58,11 +60,13 @@ def _try_resolve(name: str) -> Optional[Callable]:
     # 2) __main__
     try:
         import __main__
+
         if hasattr(__main__, name):
             return getattr(__main__, name)
     except Exception:
         pass
     return None
+
 
 # ---------- Scaling & Capping ----------
 def _median_abs(x: pd.Series) -> float:
@@ -72,18 +76,22 @@ def _median_abs(x: pd.Series) -> float:
     med = float(xa.median())
     return 1.0 if med == 0.0 else med
 
+
 def scale_and_cap_subforecast_abs10(raw: pd.Series, cap: float = 20.0) -> pd.Series:
     s = pd.Series(raw, index=raw.index, dtype=float)
     k = 10.0 / _median_abs(s)
     return (s * k).clip(-cap, cap)
 
+
 # --- NO-LOOKAHEAD SCALING OPTIONS ---
 
-def scale_and_cap_abs10_expanding(raw: pd.Series, cap: float = 20.0,
-                                  min_periods: int = 252) -> pd.Series:
+
+def scale_and_cap_abs10_expanding(
+    raw: pd.Series, cap: float = 20.0, min_periods: int = 252
+) -> pd.Series:
     """
     Expanding, past-only calibration:
-    k_t = 10 / median(|raw| up to t-1), then cap to ±cap.
+    k_t = 10 / median(|raw| up to t-1), then cap to +/-cap.
     """
     s = pd.Series(raw, dtype=float)
     med = s.abs().expanding(min_periods=min_periods).median().shift(1)
@@ -92,8 +100,13 @@ def scale_and_cap_abs10_expanding(raw: pd.Series, cap: float = 20.0,
     scaled = (s * k).clip(-cap, cap)
     return scaled.fillna(0.0)
 
-def scale_and_cap_abs10_fixed_window(raw: pd.Series, cap: float = 20.0,
-                                     calibration_end=None, lookback_days: int | None = None) -> pd.Series:
+
+def scale_and_cap_abs10_fixed_window(
+    raw: pd.Series,
+    cap: float = 20.0,
+    calibration_end=None,
+    lookback_days: int | None = None,
+) -> pd.Series:
     """
     Fixed pre-sample calibration (no look-ahead).
     Choose either a date `calibration_end` or a first N-day window.
@@ -113,13 +126,18 @@ def scale_and_cap_abs10_fixed_window(raw: pd.Series, cap: float = 20.0,
     k = 10.0 / float(med)
     return (s * k).clip(-cap, cap)
 
+
 # Optional: Carver fixed scalars for breakout horizons (no look-ahead by design)
 CARVER_BREAKOUT_SCALARS = {10: 0.60, 20: 0.67, 40: 0.70, 80: 0.73, 160: 0.74, 320: 0.74}
 
-def scale_breakout_subforecast(raw: pd.Series, horizon: int,
-                               use_carver_scalars: bool = True,
-                               scalars_dict: dict[int, float] | None = None,
-                               cap: float = 20.0) -> pd.Series:
+
+def scale_breakout_subforecast(
+    raw: pd.Series,
+    horizon: int,
+    use_carver_scalars: bool = True,
+    scalars_dict: dict[int, float] | None = None,
+    cap: float = 20.0,
+) -> pd.Series:
     s = pd.Series(raw, dtype=float)
     if use_carver_scalars:
         table = CARVER_BREAKOUT_SCALARS if scalars_dict is None else scalars_dict
@@ -136,15 +154,21 @@ def scale_breakout_subforecast(raw: pd.Series, horizon: int,
 # === Carver scalar for FAST mean reversion (Strategy 26) ===
 MEANREV_EQ_SCALAR = 9.3  # book value for the fixed scalar
 
-def scale_meanrev_eq_subforecast(raw: pd.Series, cap: float = 20.0, scalar: float = MEANREV_EQ_SCALAR) -> pd.Series:
+
+def scale_meanrev_eq_subforecast(
+    raw: pd.Series, cap: float = 20.0, scalar: float = MEANREV_EQ_SCALAR
+) -> pd.Series:
     """
     Carver-style scaling for fast mean reversion:
-    scaled = raw * scalar, then cap to ±20. No dynamic normalisation.
+    scaled = raw * scalar, then cap to +/-20. No dynamic normalisation.
     """
     s = pd.Series(raw, dtype=float)
     return (s * float(scalar)).clip(-cap, cap)
 
-def expanding_abs10_scale(raw: pd.Series, cap: float = 20.0, min_history: int = 252) -> pd.Series:
+
+def expanding_abs10_scale(
+    raw: pd.Series, cap: float = 20.0, min_history: int = 252
+) -> pd.Series:
     """
     If you want a *no-lookahead* normaliser: scale so that expanding median(|forecast|)=10.
     This is optional and NOT used for Strategy 26, but safe for experimentation.
@@ -154,6 +178,7 @@ def expanding_abs10_scale(raw: pd.Series, cap: float = 20.0, min_history: int = 
     k = 10.0 / med
     return (s * k).clip(-cap, cap)
 
+
 def scale_meanrev_trend_vol_carver(
     raw_subforecast: pd.Series,
     *,
@@ -162,7 +187,7 @@ def scale_meanrev_trend_vol_carver(
 ) -> pd.Series:
     """
     Carver-style scalar for the mean-reversion + trend overlay + vol multiplier rule.
-    Scaled forecast = Modified risk-adjusted forecast × 20; then cap to ±20.
+    Scaled forecast = Modified risk-adjusted forecast x 20; then cap to +/-20.
     """
     s = pd.Series(raw_subforecast, copy=True).astype(float)
     s = s * float(scalar)
@@ -181,13 +206,13 @@ def scale_meanrev_trend_vol_expand(
     Leak-free expanding scaler:
     - computes an expanding volatility estimate of the RAW sub-forecast
       (std or robust MAD-based) using ONLY past data;
-    - rescales so RMS ≈ `target_rms`;
-    - caps to ±`cap`.
+    - rescales so RMS ~ `target_rms`;
+    - caps to +/-`cap`.
 
     Notes:
-      • Use this when NOT using Carver's constant scalar and you want
+      - Use this when NOT using Carver's constant scalar and you want
         instrument-agnostic scaling learned from history without lookahead.
-      • `min_history` delays activation until enough samples are seen.
+      - `min_history` delays activation until enough samples are seen.
     """
     x = pd.Series(raw_subforecast, copy=True).astype(float)
 
@@ -208,15 +233,17 @@ def scale_meanrev_trend_vol_expand(
     scaled[vol.isna()] = 0.0
     return scaled
 
+
 def cap_final_forecast(series: pd.Series, cap: float = 20.0) -> pd.Series:
     return pd.Series(series, index=series.index, dtype=float).clip(-cap, cap)
+
 
 # ---------- Fallback internal forecasts (only if user functions not found) ----------
 def _fallback_breakout(price: pd.Series, horizon: int) -> pd.Series:
     # Donchian-style with previous window centre/range (smoothed); safe default
     hi = price.rolling(horizon, min_periods=horizon).max().shift(1)
     lo = price.rolling(horizon, min_periods=horizon).min().shift(1)
-    rng = (hi - lo)
+    rng = hi - lo
     rng[rng < 1e-8] = np.nan
     centre = (hi + lo) / 2.0
     raw = 40.0 * (price - centre) / rng
@@ -237,41 +264,55 @@ def _fallback_ewma_cross(price: pd.Series, fast: int, slow: int) -> pd.Series:
 # NEW: Additional Strategy Forecast Functions
 # ======================================================================================
 
-def _sigma_price_points(price: pd.Series, vol_span: int = 60, annualize_factor: float | None = None) -> pd.Series:
-    """Helper for new strategies: σ_p,t in *price points*."""
+
+def _sigma_price_points(
+    price: pd.Series, vol_span: int = 60, annualize_factor: float | None = None
+) -> pd.Series:
+    """Helper for new strategies: sigma_p,t in *price points*."""
     p = pd.Series(price, dtype=float)
     ret = p.pct_change()
-    var = ret.pow(2).ewm(span=vol_span, adjust=False, min_periods=max(10, vol_span//5)).mean()
+    var = (
+        ret.pow(2)
+        .ewm(span=vol_span, adjust=False, min_periods=max(10, vol_span // 5))
+        .mean()
+    )
     sig_pct = var.pow(0.5)
     s = p * sig_pct
     if annualize_factor is not None:
         s = s * float(annualize_factor)
     return s.replace(0, np.nan)
 
-def calc_ewmac_accel_forecast(price: pd.Series, N: int, vol_span: int = 60) -> pd.Series:
-    """Raw EWMAC_N,t = (EWMA(N) − EWMA(4N)) / σ_p,t ;  accel = EWMAC_t − EWMAC_{t−N}."""
+
+def calc_ewmac_accel_forecast(
+    price: pd.Series, N: int, vol_span: int = 60
+) -> pd.Series:
+    """Raw EWMAC_N,t = (EWMA(N) - EWMA(4N)) / sigma_p,t ;  accel = EWMAC_t - EWMAC_{t-N}."""
     p = pd.Series(price, dtype=float)
-    ewN  = p.ewm(span=N,   adjust=False).mean()
-    ew4N = p.ewm(span=4*N, adjust=False).mean()
+    ewN = p.ewm(span=N, adjust=False).mean()
+    ew4N = p.ewm(span=4 * N, adjust=False).mean()
     sigp = _sigma_price_points(p, vol_span=vol_span, annualize_factor=None)
     ewmac_raw = (ewN - ew4N) / sigp
     return ewmac_raw - ewmac_raw.shift(N)
 
+
 # def calc_meanrev_equilibrium_forecast(price: pd.Series, eq_span: int = 5, vol_span: int = 60) -> pd.Series:
-#     """Risk-adjusted mean reversion: (Equilibrium_t − p_t) / σ_p,t."""
+#     """Risk-adjusted mean reversion: (Equilibrium_t - p_t) / sigma_p,t."""
 #     p = pd.Series(price, dtype=float)
 #     equilibrium = p.ewm(span=eq_span, adjust=False).mean()
 #     raw = equilibrium - p
 #     sigp = _sigma_price_points(p, vol_span=vol_span, annualize_factor=16.0)
 #     return raw / sigp
 
-def calc_meanrev_equilibrium_forecast(price: pd.Series, eq_span: int = 5, vol_window: int = 25) -> pd.Series:
+
+def calc_meanrev_equilibrium_forecast(
+    price: pd.Series, eq_span: int = 5, vol_window: int = 25
+) -> pd.Series:
     """
     Carver Strategy 26 (fast mean reversion to equilibrium).
     equilibrium = EWMA_span=eq_span(price)
     raw        = equilibrium - price
     risk_adj   = raw / (price * daily_pct_stdev * 16)
-    Return the risk-adjusted forecast (unscaled). Scale after with 9.3 and then cap ±20.
+    Return the risk-adjusted forecast (unscaled). Scale after with 9.3 and then cap +/-20.
     """
     p = price.dropna().astype(float)
     # Equilibrium
@@ -290,41 +331,49 @@ def calc_meanrev_equilibrium_forecast(price: pd.Series, eq_span: int = 5, vol_wi
 
 def _expanding_percentile_rank(s: pd.Series) -> pd.Series:
     """Helper for vol multiplier: percentile rank of s_t within s_{1..t}."""
+
     def last_percentile(x: pd.Series) -> float:
         r = x.rank(pct=True)
         return float(r.iloc[-1])
+
     return pd.Series(s, dtype=float).expanding().apply(last_percentile, raw=False)
 
-def calc_meanrev_trend_volmult_forecast(price: pd.Series, rule_params: dict) -> pd.Series:
+
+def calc_meanrev_trend_volmult_forecast(
+    price: pd.Series, rule_params: dict
+) -> pd.Series:
     """Mean reversion with trend gating and a volatility multiplier."""
     p = pd.Series(price, dtype=float)
     # Default parameters can be overridden by rule_params dict
     params = {
-        'eq_span': 5, 'vol_span': 60, 'trend_N': 16,
-        'vol_rel_long_days': 2520, 'vol_mult_ewma_span': 10
+        "eq_span": 5,
+        "vol_span": 60,
+        "trend_N": 16,
+        "vol_rel_long_days": 2520,
+        "vol_mult_ewma_span": 10,
     }
     params.update(rule_params)
 
     # 1) Base mean-reversion
-    equilibrium = p.ewm(span=params['eq_span'], adjust=False).mean()
+    equilibrium = p.ewm(span=params["eq_span"], adjust=False).mean()
     raw_mr = equilibrium - p
-    sigp_mr = _sigma_price_points(p, vol_span=params['vol_span'], annualize_factor=16.0)
+    sigp_mr = _sigma_price_points(p, vol_span=params["vol_span"], annualize_factor=16.0)
     mr = raw_mr / sigp_mr
 
     # 2) Trend overlay
-    ewN  = p.ewm(span=params['trend_N'], adjust=False).mean()
-    ew4N = p.ewm(span=4 * params['trend_N'], adjust=False).mean()
-    sigp_tr = _sigma_price_points(p, vol_span=params['vol_span'], annualize_factor=None)
+    ewN = p.ewm(span=params["trend_N"], adjust=False).mean()
+    ew4N = p.ewm(span=4 * params["trend_N"], adjust=False).mean()
+    sigp_tr = _sigma_price_points(p, vol_span=params["vol_span"], annualize_factor=None)
     tr_raw = (ewN - ew4N) / sigp_tr
     sign_match = np.sign(mr) * np.sign(tr_raw)
     mr_gated = mr.where((sign_match >= 0) | (~np.isfinite(sign_match)), 0.0)
 
     # 3) Volatility multiplier
-    o_t = p.pct_change().ewm(span=params['vol_span']).std()
-    long_vol = o_t.rolling(window=params['vol_rel_long_days'], min_periods=60).mean()
+    o_t = p.pct_change().ewm(span=params["vol_span"]).std()
+    long_vol = o_t.rolling(window=params["vol_rel_long_days"], min_periods=60).mean()
     V_t = (o_t / long_vol).replace([np.inf, -np.inf], np.nan)
     Q_t = _expanding_percentile_rank(V_t).clip(0.0, 1.0)
-    M_t = (2.0 - 1.5 * Q_t).ewm(span=params['vol_mult_ewma_span'], adjust=False).mean()
+    M_t = (2.0 - 1.5 * Q_t).ewm(span=params["vol_mult_ewma_span"], adjust=False).mean()
 
     return mr_gated * M_t
 
@@ -336,25 +385,36 @@ def infer_periods_per_day(index: pd.DatetimeIndex) -> int:
     per_day = pd.Series(1, index=index).groupby(index.normalize()).sum()
     return int(max(1, per_day.median()))
 
+
 def _prepare_fx(index, fx_series: Optional[pd.Series]) -> pd.Series:
     if fx_series is None:
         return pd.Series(1.0, index=index)
     fx = pd.Series(fx_series).reindex(index).ffill().bfill()
     return fx
 
-def compute_value_volatility(price: pd.Series,
-                             value_per_point: float = 1.0,
-                             fx_series: Optional[pd.Series] = None,
-                             lookback: int = 500,
-                             periods_per_day: Optional[int] = None) -> pd.Series:
+
+def compute_value_volatility(
+    price: pd.Series,
+    value_per_point: float = 1.0,
+    fx_series: Optional[pd.Series] = None,
+    lookback: int = 500,
+    periods_per_day: Optional[int] = None,
+) -> pd.Series:
     price = pd.Series(price).astype(float)
     if periods_per_day is None:
         periods_per_day = infer_periods_per_day(price.index)
-    point_vol = price.diff().rolling(lookback, min_periods=max(2, lookback//2)).std().shift(1).bfill()
+    point_vol = (
+        price.diff()
+        .rolling(lookback, min_periods=max(2, lookback // 2))
+        .std()
+        .shift(1)
+        .bfill()
+    )
     fx = _prepare_fx(price.index, fx_series)
     value_vol_per_bar = point_vol * float(value_per_point) * fx
     value_vol_daily = value_vol_per_bar * np.sqrt(max(1, periods_per_day))
     return value_vol_daily
+
 
 # def compute_volatility_scalar(price: pd.Series,
 #                               ann_cash_vol_target: float,
@@ -367,13 +427,15 @@ def compute_value_volatility(price: pd.Series,
 #     value_vol_daily = compute_value_volatility(price, value_per_point=value_per_point,
 #                                               fx_series=fx_series, lookback=lookback,
 #                                               periods_per_day=periods_per_day)
-#     daily_cash_vol_target = float(ann_cash_vol_target) / 16.0  # ≈ sqrt(256 business days)
+#     daily_cash_vol_target = float(ann_cash_vol_target) / 16.0  # ~ sqrt(256 business days)
 #     vol_scalar = daily_cash_vol_target / value_vol_daily.replace(0.0, np.nan)
 #     return pd.Series(vol_scalar, index=pd.Series(price).index)
+
 
 def _infer_periods_per_day(index) -> float:
     """Crude detector for business-day data; keep at 1 for daily."""
     return 1.0
+
 
 # ------------------ volatility pieces (past only) ------------------
 def _sigma_pct_daily(price: pd.Series, span: int) -> pd.Series:
@@ -382,14 +444,16 @@ def _sigma_pct_daily(price: pd.Series, span: int) -> pd.Series:
     sig = r.ewm(span=span, adjust=False).std()
     return sig.shift(1)  # strictly past
 
+
 def _sigma_points_for_meanrev(price: pd.Series, vol_span: int) -> pd.Series:
     """
     Carver mean-reversion denominator:
-      σ_p,t = price_t × σ%_daily,t × 16
-    where σ%_daily,t is an EWMA daily % volatility (past-only).
+      sigma_p,t = price_t x sigma%_daily,t x 16
+    where sigma%_daily,t is an EWMA daily % volatility (past-only).
     """
     sig_pct_daily = _sigma_pct_daily(price, span=vol_span)
     return price * sig_pct_daily * 16.0
+
 
 # def compute_volatility_scalar(price: pd.Series,
 #                               capital: float,
@@ -402,8 +466,8 @@ def _sigma_points_for_meanrev(price: pd.Series, vol_span: int) -> pd.Series:
 #                               **legacy_kwargs) -> pd.Series:
 #     """
 #     Scalar that converts 1 risk block into contracts:
-#       vol_scalar_t = (Capital × target_daily_RU) / σ_dollar,t
-#       σ_dollar,t   = price_t × FX_t × σ%_daily,t
+#       vol_scalar_t = (Capital x target_daily_RU) / sigma_dollar,t
+#       sigma_dollar,t   = price_t x FX_t x sigma%_daily,t
 #       target_daily_RU = pct_vol_target / sqrt(252)
 #     If pct_vol_target is None: fall back to any legacy ann_cash input or return 1.0.
 
@@ -445,15 +509,15 @@ def _sigma_points_for_meanrev(price: pd.Series, vol_span: int) -> pd.Series:
 
 def compute_volatility_scalar(
     price: pd.Series,
-    ann_cash_vol_target: float | None = None,   # old style
-    capital: float | None = None,               # new style
-    pct_vol_target: float | None = None,        # new style
+    ann_cash_vol_target: float | None = None,  # old style
+    capital: float | None = None,  # new style
+    pct_vol_target: float | None = None,  # new style
     lookback: int = 500,
     value_per_point: float = 1.0,
     fx_series: pd.Series | None = None,
-    periods_per_day: int | None = None,         # new kwarg (from caller)
-    period_per_day: int | None = None,          # tolerate alias
-    **_legacy_kwargs,                            # swallow any stragglers
+    periods_per_day: int | None = None,  # new kwarg (from caller)
+    period_per_day: int | None = None,  # tolerate alias
+    **_legacy_kwargs,  # swallow any stragglers
 ) -> pd.Series:
     price = pd.Series(price).astype(float)
 
@@ -473,10 +537,10 @@ def compute_volatility_scalar(
     # Determine numerator (target daily cash vol)
     numer = None
     if ann_cash_vol_target is not None:
-        # old API: annual cash vol → daily using ~sqrt(256) ≈ 16
+        # old API: annual cash vol -> daily using ~sqrt(256) ~ 16
         numer = float(ann_cash_vol_target) / 16.0
     elif capital is not None and pct_vol_target is not None:
-        # new API: capital × (daily risk units)
+        # new API: capital x (daily risk units)
         numer = float(capital) * (float(pct_vol_target) / np.sqrt(BUSDAYS))
     else:
         # tolerate old kwarg names if passed in **_legacy_kwargs
@@ -523,9 +587,9 @@ def compute_volatility_scalar(
 def apply_carver_position_sizing(
     signal: pd.Series | np.ndarray,
     price: pd.Series,
-    ann_cash_vol_target: float | None = None,   # old style supported
-    capital: float | None = None,               # new style supported
-    pct_vol_target: float | None = None,        # new style supported
+    ann_cash_vol_target: float | None = None,  # old style supported
+    capital: float | None = None,  # new style supported
+    pct_vol_target: float | None = None,  # new style supported
     value_per_point: float = 1.0,
     fx_series: pd.Series | None = None,
     lookback: int = 500,
@@ -552,8 +616,6 @@ def apply_carver_position_sizing(
     return pos.replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0)
 
 
-
-
 # ---------- PnL & Sharpe ----------
 # def _pnl_sharpe_from_positions(
 #     price: pd.Series,
@@ -574,6 +636,7 @@ def apply_carver_position_sizing(
 #     sharpe = (ret.mean() / ret.std(ddof=0)) * np.sqrt(BUSDAYS)
 #     return ret, float(sharpe)
 
+
 def _pnl_sharpe_from_positions(
     price: pd.Series,
     positions_blocks: pd.Series,
@@ -582,12 +645,15 @@ def _pnl_sharpe_from_positions(
     capital: float,
     *,
     cost_per_contract_point: float = 0.0,  # e.g. 0.5 ticks -> 0.5 if 1 point=1 tick
-    cost_bps_notional: float = 0.0,        # alternative: bps of traded notional
-    deadband_blocks: float = 0.0           # e.g. 0.1 -> ignore trades <0.1 blocks
+    cost_bps_notional: float = 0.0,  # alternative: bps of traded notional
+    deadband_blocks: float = 0.0,  # e.g. 0.1 -> ignore trades <0.1 blocks
 ) -> Tup[pd.Series, float]:
     idx = price.index
-    fx = (pd.Series(1.0, index=idx) if fx_series is None
-          else pd.Series(fx_series).reindex(idx).ffill().bfill())
+    fx = (
+        pd.Series(1.0, index=idx)
+        if fx_series is None
+        else pd.Series(fx_series).reindex(idx).ffill().bfill()
+    )
 
     price_diff = price.diff()
     # Base PnL (value units)
@@ -598,7 +664,7 @@ def _pnl_sharpe_from_positions(
     if deadband_blocks > 0:
         dpos = dpos.where(dpos >= float(deadband_blocks), 0.0)
 
-    # cost in “points × value_per_point”
+    # cost in "points x value_per_point"
     cost_points = dpos * float(cost_per_contract_point)
     cost_val = cost_points * float(value_per_point) * fx
 
@@ -616,7 +682,6 @@ def _pnl_sharpe_from_positions(
     return ret, float(sharpe)
 
 
-
 # ---------- Price alignment ----------
 def _align_prices(price_frame: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
     pf = price_frame.copy()
@@ -626,18 +691,25 @@ def _align_prices(price_frame: pd.DataFrame, tickers: List[str]) -> pd.DataFrame
     cols = [t for t in tickers if t in pf.columns]
     return pf[cols].astype(float).ffill().bfill()
 
+
 # ---------- Combine forecasts ----------
-def _combine_weighted_forecasts(sub_forecasts: List[pd.Series], weights: np.ndarray) -> pd.Series:
+def _combine_weighted_forecasts(
+    sub_forecasts: List[pd.Series], weights: np.ndarray
+) -> pd.Series:
     w = np.array(weights, dtype=float)
     w = np.maximum(w, 0.0)
     if w.sum() == 0:
         w = np.ones_like(w)
     w = w / w.sum()
     base_index = sub_forecasts[0].index
-    combo = sum(w[i] * sub_forecasts[i].reindex(base_index).fillna(0.0) for i in range(len(w)))
+    combo = sum(
+        w[i] * sub_forecasts[i].reindex(base_index).fillna(0.0) for i in range(len(w))
+    )
     return pd.Series(combo, index=base_index, dtype=float)
 
+
 # ---------- Backtest per ticker (Carver sizing) ----------
+
 
 ## With trading frictions
 def _backtest_ticker_carver(
@@ -651,27 +723,29 @@ def _backtest_ticker_carver(
     value_per_point: float = 1.0,
     fx_series: pd.Series | None = None,
     # NEW: trading frictions
-    buffer_risk_units: float = 0.0,      # Carver deadband in blocks
-    commission_bps: float = 0.0,         # per side (or roundtrip if you prefer)
-    spread_bps: float = 0.0,             # half-spread * 2 ≈ roundtrip bps
-    cost_per_contract_point: float = 0.0 # if you model a fixed tick cost
+    buffer_risk_units: float = 0.0,  # Carver deadband in blocks
+    commission_bps: float = 0.0,  # per side (or roundtrip if you prefer)
+    spread_bps: float = 0.0,  # half-spread * 2 ~ roundtrip bps
+    cost_per_contract_point: float = 0.0,  # if you model a fixed tick cost
 ) -> tuple[pd.Series, float]:
     """
     Builds combined forecast -> positions -> net PnL & Sharpe.
     """
     # ---- combine & two-stage cap ----
-    # (assume sub_forecasts already scaled & capped ±20 individually)
+    # (assume sub_forecasts already scaled & capped +/-20 individually)
     aligned = [sf.reindex(price.index).fillna(0.0) for sf in sub_forecasts]
     w = np.array(weights, dtype=float)
     w = w / (w.sum() if w.sum() != 0 else 1.0)
     combined = np.tensordot(np.vstack(aligned).T, w, axes=(1, 0))
-    # final cap ±20
+    # final cap +/-20
     combined = pd.Series(combined, index=price.index).clip(-20.0, 20.0)
 
     # ---- position sizing in blocks (vol-targeted) ----
     # sigma% is past-only; sizing uses t info, trades at t+1 (in PnL fn)
     ret = price.pct_change()
-    sig_pct = ret.ewm(span=vol_lookback_for_position_sizing, adjust=False).std().shift(1)
+    sig_pct = (
+        ret.ewm(span=vol_lookback_for_position_sizing, adjust=False).std().shift(1)
+    )
     sig_ann = sig_pct * np.sqrt(BUSDAYS)
     # sigma_dollar = price * (fx_series.ffill() if fx_series is not None else 1.0) * sig_ann
     sigma_dollar = (
@@ -690,7 +764,7 @@ def _backtest_ticker_carver(
         denom = sigma_dollar.replace(0.0, np.nan)
         vol_scalar = (numer / denom).clip(lower=0).fillna(0.0)
 
-    # map forecast (±20) to blocks via /10 rule
+    # map forecast (+/-20) to blocks via /10 rule
     positions_blocks = vol_scalar * (combined / 10.0)
 
     # ---- NET PnL (commissions, spread, deadband) ----
@@ -719,9 +793,11 @@ def _backtest_ticker_carver(
 from contextlib import contextmanager
 import inspect
 
+
 @contextmanager
 def _optuna_quiet(silent: bool = True):
     import optuna
+
     if not silent:
         yield
         return
@@ -732,7 +808,10 @@ def _optuna_quiet(silent: bool = True):
     finally:
         optuna.logging.set_verbosity(prev)
 
-def _study_optimize_quiet(study, objective, n_trials: int, n_jobs: int | None, show_progress_bar: bool):
+
+def _study_optimize_quiet(
+    study, objective, n_trials: int, n_jobs: int | None, show_progress_bar: bool
+):
     """Call Study.optimize without printing progress bars, but stay compatible with older Optuna."""
     sig = inspect.signature(study.optimize)
     kwargs = {"n_trials": int(n_trials)}
@@ -742,12 +821,15 @@ def _study_optimize_quiet(study, objective, n_trials: int, n_jobs: int | None, s
         kwargs["show_progress_bar"] = bool(show_progress_bar)
     study.optimize(objective, **kwargs)
 
+
 from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
+
 def _is_num(x) -> bool:
     return isinstance(x, (int, float, np.integer, np.floating))
+
 
 def _get(source, key: str, default=None):
     """
@@ -816,6 +898,7 @@ def _get_fx_series(fx_series_map, key: str):
     # Add other shapes if you later support them
     return None
 
+
 # =========================
 # OPTUNA optimizer: Breakout (quiet)
 # =========================
@@ -836,8 +919,8 @@ def optimize_breakout_weights_carver(
     carver_breakout_scalars: dict[int, float] | None = None,
     # NEW: quiet controls
     silent: bool = True,
-    n_jobs: int | None = None,             # parallelize trials within this process
-    show_progress_bar: bool = False,       # keep off to avoid terminal spam
+    n_jobs: int | None = None,  # parallelize trials within this process
+    show_progress_bar: bool = False,  # keep off to avoid terminal spam
 ) -> dict[str, dict]:
     """
     Optuna optimizer for breakout sub-forecast weights (per ticker), maximizing Sharpe.
@@ -854,25 +937,31 @@ def optimize_breakout_weights_carver(
     results: dict[str, dict] = {}
     sampler = TPESampler(seed=random_seed)
 
-    user_breakout_fn = external_breakout_forecast_fn or _try_resolve("calc_breakout_forecast")
+    user_breakout_fn = external_breakout_forecast_fn or _try_resolve(
+        "calc_breakout_forecast"
+    )
 
     for t in tickers:
         px = pf[t]
 
-        # Build raw → scaled sub-forecasts
+        # Build raw -> scaled sub-forecasts
         subs_raw = []
         for h in breakout_horizons:
-            sf = (user_breakout_fn(px, int(h)) if user_breakout_fn is not None
-                  else _fallback_breakout(px, int(h)))
+            sf = (
+                user_breakout_fn(px, int(h))
+                if user_breakout_fn is not None
+                else _fallback_breakout(px, int(h))
+            )
             subs_raw.append(pd.Series(sf, index=px.index, dtype=float))
 
         if use_carver_scalars and "scale_breakout_subforecast" in globals():
             subs = [
                 scale_breakout_subforecast(
-                    sf, int(h),
+                    sf,
+                    int(h),
                     use_carver_scalars=True,
                     scalars_dict=carver_breakout_scalars,
-                    cap=20.0
+                    cap=20.0,
                 )
                 for sf, h in zip(subs_raw, breakout_horizons)
             ]
@@ -883,7 +972,10 @@ def optimize_breakout_weights_carver(
         fx_series = None if not fx_map else fx_map.get(t, None)
 
         def objective(trial: "optuna.trial.Trial") -> float:
-            w = np.array([trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(subs))], dtype=float)
+            w = np.array(
+                [trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(subs))],
+                dtype=float,
+            )
             if w.sum() == 0.0:
                 w[:] = 1.0
             _, sr = _backtest_ticker_carver(
@@ -903,15 +995,18 @@ def optimize_breakout_weights_carver(
         study = optuna.create_study(direction="maximize", sampler=sampler)
         with _optuna_quiet(silent):
             _study_optimize_quiet(
-                study, objective,
+                study,
+                objective,
                 n_trials=n_trials_per_ticker,
                 n_jobs=n_jobs,
-                show_progress_bar=show_progress_bar
+                show_progress_bar=show_progress_bar,
             )
 
         # Normalize and store best weights
         best_params = study.best_trial.params
-        raw = np.array([best_params.get(f"w_{i}", 0.0) for i in range(len(subs))], dtype=float)
+        raw = np.array(
+            [best_params.get(f"w_{i}", 0.0) for i in range(len(subs))], dtype=float
+        )
         if raw.sum() == 0.0:
             raw[:] = 1.0
         best_w = (raw / raw.sum()).tolist()
@@ -924,6 +1019,7 @@ def optimize_breakout_weights_carver(
 
     return results
 
+
 def optimize_breakout_weights_optuna_fullsample(
     price_frame: pd.DataFrame,
     tickers: List[str],
@@ -932,8 +1028,8 @@ def optimize_breakout_weights_optuna_fullsample(
     vol_lookback_for_position_sizing: int,
     capital: float = 1_000_000,
     pct_vol_target: float = 0.20,
-    use_carver_scalars: bool = True,         # default: Carver scalars (no scaling leak)
-    scalar_min_history: int = 252,           # used if use_carver_scalars=False
+    use_carver_scalars: bool = True,  # default: Carver scalars (no scaling leak)
+    scalar_min_history: int = 252,  # used if use_carver_scalars=False
     commission_bps_map: Dict[str, float] | float = 0.0,
     spread_bps_map: Dict[str, float] | float = 0.0,
     buffer_risk_units_map: Dict[str, float] | float = 0.0,
@@ -962,7 +1058,9 @@ def optimize_breakout_weights_optuna_fullsample(
             continue
 
         def _objective(trial: optuna.Trial) -> float:
-            w = np.array([trial.suggest_float(f"w_{h}", 0.0, 1.0) for h in H], dtype=float)
+            w = np.array(
+                [trial.suggest_float(f"w_{h}", 0.0, 1.0) for h in H], dtype=float
+            )
             if w.sum() == 0:
                 w[0] = 1.0
             w = w / w.sum()
@@ -973,12 +1071,17 @@ def optimize_breakout_weights_optuna_fullsample(
                 if use_carver_scalars:
                     sf = _scale_carver_breakout(raw, h)
                 else:
-                    sf = scale_and_cap_subforecast_abs10(raw, cap=20.0, min_periods=scalar_min_history)
+                    sf = scale_and_cap_subforecast_abs10(
+                        raw, cap=20.0, min_periods=scalar_min_history
+                    )
                 subs.append(sf)
 
             ret, sr = _backtest_ticker_carver(
-                price=px, sub_forecasts=subs, weights=w,
-                capital=capital, pct_vol_target=pct_vol_target,
+                price=px,
+                sub_forecasts=subs,
+                weights=w,
+                capital=capital,
+                pct_vol_target=pct_vol_target,
                 vol_lookback_for_position_sizing=vol_lookback_for_position_sizing,
                 value_per_point=_get(value_per_point_map, t, 1.0),
                 fx_series=None if fx_series_map is None else fx_series_map.get(t),
@@ -989,19 +1092,33 @@ def optimize_breakout_weights_optuna_fullsample(
             return float(sr if np.isfinite(sr) else -1e9)
 
         study = optuna.create_study(direction="maximize")
-        study.optimize(_objective, n_trials=n_trials_per_ticker, n_jobs=n_jobs, show_progress_bar=show_progress_bar)
-        best_w = np.array([study.best_params.get(f"w_{h}", 1.0) for h in H], dtype=float)
+        study.optimize(
+            _objective,
+            n_trials=n_trials_per_ticker,
+            n_jobs=n_jobs,
+            show_progress_bar=show_progress_bar,
+        )
+        best_w = np.array(
+            [study.best_params.get(f"w_{h}", 1.0) for h in H], dtype=float
+        )
         best_w = best_w / (best_w.sum() if best_w.sum() != 0 else 1.0)
 
         # final score with best weights
         subs_best = []
         for h in H:
             raw = calc_breakout_forecast(px, h)
-            sf = _scale_carver_breakout(raw, h) if use_carver_scalars else scale_and_cap_subforecast_abs10(raw, 20.0, scalar_min_history)
+            sf = (
+                _scale_carver_breakout(raw, h)
+                if use_carver_scalars
+                else scale_and_cap_subforecast_abs10(raw, 20.0, scalar_min_history)
+            )
             subs_best.append(sf)
         _, best_sr = _backtest_ticker_carver(
-            price=px, sub_forecasts=subs_best, weights=best_w,
-            capital=capital, pct_vol_target=pct_vol_target,
+            price=px,
+            sub_forecasts=subs_best,
+            weights=best_w,
+            capital=capital,
+            pct_vol_target=pct_vol_target,
             vol_lookback_for_position_sizing=vol_lookback_for_position_sizing,
             value_per_point=_get(value_per_point_map, t, 1.0),
             fx_series=None if fx_series_map is None else fx_series_map.get(t),
@@ -1010,8 +1127,13 @@ def optimize_breakout_weights_optuna_fullsample(
             spread_bps=_get(spread_bps_map, t, 0.0),
         )
 
-        results[t] = {"best_weights": best_w.tolist(), "sharpe": float(best_sr), "horizons": H}
+        results[t] = {
+            "best_weights": best_w.tolist(),
+            "sharpe": float(best_sr),
+            "horizons": H,
+        }
     return results
+
 
 # =========================
 # OPTUNA optimizer: EWMA cross (quiet)
@@ -1054,9 +1176,12 @@ def optimize_ewma_cross_weights_carver(
         px = pf[t]
 
         subs_raw = []
-        for (f, s) in ewma_pairs:
-            sf = (user_ewma_fn(px, int(f), int(s)) if user_ewma_fn is not None
-                  else _fallback_ewma_cross(px, int(f), int(s)))
+        for f, s in ewma_pairs:
+            sf = (
+                user_ewma_fn(px, int(f), int(s))
+                if user_ewma_fn is not None
+                else _fallback_ewma_cross(px, int(f), int(s))
+            )
             subs_raw.append(pd.Series(sf, index=px.index, dtype=float))
 
         subs = [scale_and_cap_subforecast_abs10(sf, cap=20.0) for sf in subs_raw]
@@ -1065,7 +1190,10 @@ def optimize_ewma_cross_weights_carver(
         fx_series = None if not fx_map else fx_map.get(t, None)
 
         def objective(trial: "optuna.trial.Trial") -> float:
-            w = np.array([trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(subs))], dtype=float)
+            w = np.array(
+                [trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(subs))],
+                dtype=float,
+            )
             if w.sum() == 0.0:
                 w[:] = 1.0
             _, sr = _backtest_ticker_carver(
@@ -1085,14 +1213,17 @@ def optimize_ewma_cross_weights_carver(
         study = optuna.create_study(direction="maximize", sampler=sampler)
         with _optuna_quiet(silent):
             _study_optimize_quiet(
-                study, objective,
+                study,
+                objective,
                 n_trials=n_trials_per_ticker,
                 n_jobs=n_jobs,
-                show_progress_bar=show_progress_bar
+                show_progress_bar=show_progress_bar,
             )
 
         best_params = study.best_trial.params
-        raw = np.array([best_params.get(f"w_{i}", 0.0) for i in range(len(subs))], dtype=float)
+        raw = np.array(
+            [best_params.get(f"w_{i}", 0.0) for i in range(len(subs))], dtype=float
+        )
         if raw.sum() == 0.0:
             raw[:] = 1.0
         best_w = (raw / raw.sum()).tolist()
@@ -1105,11 +1236,15 @@ def optimize_ewma_cross_weights_carver(
 
     return results
 
+
 # =========================
 # NEW: OPTUNA optimizers for additional strategies
 # =========================
-def _create_generic_optimizer(strategy_forecast_func, rule_arg_name, result_key_name, strat_lower = 'vanilla'):
+def _create_generic_optimizer(
+    strategy_forecast_func, rule_arg_name, result_key_name, strat_lower="vanilla"
+):
     """A factory to create optimizer functions for different strategies."""
+
     def generic_optimizer(
         price_frame: pd.DataFrame,
         tickers: list[str],
@@ -1124,7 +1259,7 @@ def _create_generic_optimizer(strategy_forecast_func, rule_arg_name, result_key_
         silent: bool = True,
         n_jobs: int | None = None,
         show_progress_bar: bool = False,
-        **strategy_kwargs
+        **strategy_kwargs,
     ) -> dict[str, dict]:
         try:
             import optuna
@@ -1148,29 +1283,41 @@ def _create_generic_optimizer(strategy_forecast_func, rule_arg_name, result_key_
                 subs = [scale_meanrev_eq_subforecast(sf, cap=20.0) for sf in subs_raw]
             else:
                 # keep generic abs-10 scaler for other strategies, if you wish
-                subs = [scale_and_cap_subforecast_abs10(sf, cap=20.0) for sf in subs_raw]
+                subs = [
+                    scale_and_cap_subforecast_abs10(sf, cap=20.0) for sf in subs_raw
+                ]
 
             vpp = value_per_point_map.get(t, 1.0) if value_per_point_map else 1.0
             fx_series = fx_map.get(t) if fx_map else None
 
             def objective(trial: "optuna.trial.Trial") -> float:
-                w = np.array([trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(subs))])
-                if w.sum() == 0.0: w[:] = 1.0
+                w = np.array(
+                    [trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(subs))]
+                )
+                if w.sum() == 0.0:
+                    w[:] = 1.0
                 _, sr = _backtest_ticker_carver(
-                    price=px, sub_forecasts=subs, weights=w, capital=capital,
+                    price=px,
+                    sub_forecasts=subs,
+                    weights=w,
+                    capital=capital,
                     pct_vol_target=pct_vol_target,
                     vol_lookback_for_position_sizing=vol_lookback_for_position_sizing,
-                    value_per_point=vpp, fx_series=fx_series,
+                    value_per_point=vpp,
+                    fx_series=fx_series,
                 )
                 return float(sr) if np.isfinite(sr) else -1e12
 
             study = optuna.create_study(direction="maximize", sampler=sampler)
             with _optuna_quiet(silent):
-                _study_optimize_quiet(study, objective, n_trials_per_ticker, n_jobs, show_progress_bar)
+                _study_optimize_quiet(
+                    study, objective, n_trials_per_ticker, n_jobs, show_progress_bar
+                )
 
             best_params = study.best_trial.params
             raw = np.array([best_params.get(f"w_{i}", 0.0) for i in range(len(subs))])
-            if raw.sum() == 0.0: raw[:] = 1.0
+            if raw.sum() == 0.0:
+                raw[:] = 1.0
             best_w = (raw / raw.sum()).tolist()
 
             results[t] = {
@@ -1179,6 +1326,7 @@ def _create_generic_optimizer(strategy_forecast_func, rule_arg_name, result_key_
                 result_key_name: rule_variations,
             }
         return results
+
     return generic_optimizer
 
 
@@ -1190,19 +1338,20 @@ def optimize_meanrev_eq_optuna_fs(
     vol_lookback_for_position_sizing: int,
     capital: float = 1_000_000,
     pct_vol_target: float = 0.20,
-    use_carver_scalars: bool = True,      # True -> scalar 9.3 (book); False -> expanding scaler
+    use_carver_scalars: bool = True,  # True -> scalar 9.3 (book); False -> expanding scaler
     scalar_min_history: int = 252,
     commission_bps_map: Dict[str, float] | float = 0.0,
     spread_bps_map: Dict[str, float] | float = 0.0,
     buffer_risk_units_map: Dict[str, float] | float = 0.0,
     value_per_point_map: Dict[str, float] | float = 1.0,
     fx_map: Dict[str, pd.Series] | None = None,
-    n_trials_per_ticker: int = 80,        # if >1 spans, we learn weights
+    n_trials_per_ticker: int = 80,  # if >1 spans, we learn weights
     n_jobs: int | None = None,
     silent: bool = True,
     show_progress_bar: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
-    if silent: optuna.logging.set_verbosity(optuna.logging.WARNING)
+    if silent:
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
     S = [int(s) for s in mr_eq_spans]
     results: Dict[str, Dict[str, Any]] = {}
 
@@ -1217,19 +1366,31 @@ def optimize_meanrev_eq_optuna_fs(
             if len(S) == 1:
                 w = np.array([1.0])
             else:
-                w = np.array([trial.suggest_float(f"w_{s}", 0.0, 1.0) for s in S], dtype=float)
-                if w.sum()==0: w[0]=1.0
+                w = np.array(
+                    [trial.suggest_float(f"w_{s}", 0.0, 1.0) for s in S], dtype=float
+                )
+                if w.sum() == 0:
+                    w[0] = 1.0
                 w = w / w.sum()
 
-            subs=[]
+            subs = []
             for sspan in S:
-                raw = calc_meanrev_equilibrium_forecast(px, eq_span=sspan)  # risk-adjusted raw (book)
-                sf = scale_meanrev_eq_subforecast(raw) if use_carver_scalars else scale_and_cap_subforecast_abs10(raw, 20.0, scalar_min_history)
+                raw = calc_meanrev_equilibrium_forecast(
+                    px, eq_span=sspan
+                )  # risk-adjusted raw (book)
+                sf = (
+                    scale_meanrev_eq_subforecast(raw)
+                    if use_carver_scalars
+                    else scale_and_cap_subforecast_abs10(raw, 20.0, scalar_min_history)
+                )
                 subs.append(sf)
 
             _, sr = _backtest_ticker_carver(
-                price=px, sub_forecasts=subs, weights=w,
-                capital=capital, pct_vol_target=pct_vol_target,
+                price=px,
+                sub_forecasts=subs,
+                weights=w,
+                capital=capital,
+                pct_vol_target=pct_vol_target,
                 vol_lookback_for_position_sizing=vol_lookback_for_position_sizing,
                 value_per_point=_get(value_per_point_map, t, 1.0),
                 fx_series=None if fx_map is None else fx_map.get(t),
@@ -1241,22 +1402,33 @@ def optimize_meanrev_eq_optuna_fs(
 
         study = optuna.create_study(direction="maximize")
         total_trials = n_trials_per_ticker if len(S) > 1 else 1
-        _study_optimize_quiet(study, _objective, total_trials, n_jobs, show_progress_bar)
+        _study_optimize_quiet(
+            study, _objective, total_trials, n_jobs, show_progress_bar
+        )
 
-        if len(S)==1:
+        if len(S) == 1:
             best_w = np.array([1.0])
         else:
-            best_w = np.array([study.best_params.get(f"w_{s}", 1.0) for s in S], dtype=float)
-            best_w = best_w / (best_w.sum() if best_w.sum()!=0 else 1.0)
+            best_w = np.array(
+                [study.best_params.get(f"w_{s}", 1.0) for s in S], dtype=float
+            )
+            best_w = best_w / (best_w.sum() if best_w.sum() != 0 else 1.0)
 
-        subs_best=[]
+        subs_best = []
         for sspan in S:
             raw = calc_meanrev_equilibrium_forecast(px, eq_span=sspan)
-            sf = scale_meanrev_eq_subforecast(raw) if use_carver_scalars else scale_and_cap_subforecast_abs10(raw, 20.0, scalar_min_history)
+            sf = (
+                scale_meanrev_eq_subforecast(raw)
+                if use_carver_scalars
+                else scale_and_cap_subforecast_abs10(raw, 20.0, scalar_min_history)
+            )
             subs_best.append(sf)
         _, best_sr = _backtest_ticker_carver(
-            price=px, sub_forecasts=subs_best, weights=best_w,
-            capital=capital, pct_vol_target=pct_vol_target,
+            price=px,
+            sub_forecasts=subs_best,
+            weights=best_w,
+            capital=capital,
+            pct_vol_target=pct_vol_target,
             vol_lookback_for_position_sizing=vol_lookback_for_position_sizing,
             value_per_point=_get(value_per_point_map, t, 1.0),
             fx_series=None if fx_map is None else fx_map.get(t),
@@ -1264,18 +1436,25 @@ def optimize_meanrev_eq_optuna_fs(
             commission_bps=_get(commission_bps_map, t, 0.0),
             spread_bps=_get(spread_bps_map, t, 0.0),
         )
-        results[t] = {"best_weights": best_w.tolist(), "sharpe": float(best_sr), "spans": S}
+        results[t] = {
+            "best_weights": best_w.tolist(),
+            "sharpe": float(best_sr),
+            "spans": S,
+        }
     return results
+
 
 def optimize_meanrev_trend_vol_fs(
     price_frame: pd.DataFrame,
     tickers: List[str],
-    rule_param_list: List[Dict[str, Any]],  # e.g. [{"fast":16,"slow":64,"vol_window":10}, ...]
+    rule_param_list: List[
+        Dict[str, Any]
+    ],  # e.g. [{"fast":16,"slow":64,"vol_window":10}, ...]
     *,
     vol_lookback_for_position_sizing: int,
     capital: float = 1_000_000,
     pct_vol_target: float = 0.20,
-    use_carver_scalars: bool = True,      # True->scalar 20; False->expanding scaler
+    use_carver_scalars: bool = True,  # True->scalar 20; False->expanding scaler
     scalar_min_history: int = 252,
     commission_bps_map: Dict[str, float] | float = 0.0,
     spread_bps_map: Dict[str, float] | float = 0.0,
@@ -1287,8 +1466,13 @@ def optimize_meanrev_trend_vol_fs(
     silent: bool = True,
     show_progress_bar: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
-    if silent: optuna.logging.set_verbosity(optuna.logging.WARNING)
-    R = rule_param_list if rule_param_list else [{"fast":16,"slow":64,"vol_window":10}]
+    if silent:
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    R = (
+        rule_param_list
+        if rule_param_list
+        else [{"fast": 16, "slow": 64, "vol_window": 10}]
+    )
     results: Dict[str, Dict[str, Any]] = {}
 
     for t in tickers:
@@ -1299,22 +1483,35 @@ def optimize_meanrev_trend_vol_fs(
             continue
 
         def _objective(trial: optuna.Trial) -> float:
-            if len(R)==1:
+            if len(R) == 1:
                 w = np.array([1.0])
             else:
-                w = np.array([trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(R))], dtype=float)
-                if w.sum()==0: w[0]=1.0
+                w = np.array(
+                    [trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(R))],
+                    dtype=float,
+                )
+                if w.sum() == 0:
+                    w[0] = 1.0
                 w = w / w.sum()
 
-            subs=[]
+            subs = []
             for params in R:
-                raw = calc_meanrev_trend_volmult_forecast(px, rule_params=params)  # your implementation
-                sf = scale_meanrev_trend_vol_carver(raw) if use_carver_scalars else scale_and_cap_subforecast_abs10(raw, 20.0, scalar_min_history)
+                raw = calc_meanrev_trend_volmult_forecast(
+                    px, rule_params=params
+                )  # your implementation
+                sf = (
+                    scale_meanrev_trend_vol_carver(raw)
+                    if use_carver_scalars
+                    else scale_and_cap_subforecast_abs10(raw, 20.0, scalar_min_history)
+                )
                 subs.append(sf)
 
             _, sr = _backtest_ticker_carver(
-                price=px, sub_forecasts=subs, weights=w,
-                capital=capital, pct_vol_target=pct_vol_target,
+                price=px,
+                sub_forecasts=subs,
+                weights=w,
+                capital=capital,
+                pct_vol_target=pct_vol_target,
                 vol_lookback_for_position_sizing=vol_lookback_for_position_sizing,
                 value_per_point=_get(value_per_point_map, t, 1.0),
                 fx_series=None if fx_series_map is None else fx_series_map.get(t),
@@ -1326,19 +1523,35 @@ def optimize_meanrev_trend_vol_fs(
 
         study = optuna.create_study(direction="maximize")
         total_trials = n_trials_per_ticker if len(R) > 1 else 1
-        _study_optimize_quiet(study, _objective, total_trials, n_jobs, show_progress_bar)
+        _study_optimize_quiet(
+            study, _objective, total_trials, n_jobs, show_progress_bar
+        )
 
-        best_w = np.array([1.0]) if len(R)==1 else np.array([study.best_params.get(f"w_{i}", 1.0) for i in range(len(R))], dtype=float)
-        best_w = best_w / (best_w.sum() if best_w.sum()!=0 else 1.0)
+        best_w = (
+            np.array([1.0])
+            if len(R) == 1
+            else np.array(
+                [study.best_params.get(f"w_{i}", 1.0) for i in range(len(R))],
+                dtype=float,
+            )
+        )
+        best_w = best_w / (best_w.sum() if best_w.sum() != 0 else 1.0)
 
-        subs_best=[]
+        subs_best = []
         for params in R:
             raw = calc_meanrev_trend_volmult_forecast(px, rule_params=params)
-            sf = scale_meanrev_trend_vol_carver(raw) if use_carver_scalars else scale_and_cap_subforecast_abs10(raw, 20.0, scalar_min_history)
+            sf = (
+                scale_meanrev_trend_vol_carver(raw)
+                if use_carver_scalars
+                else scale_and_cap_subforecast_abs10(raw, 20.0, scalar_min_history)
+            )
             subs_best.append(sf)
         _, best_sr = _backtest_ticker_carver(
-            price=px, sub_forecasts=subs_best, weights=best_w,
-            capital=capital, pct_vol_target=pct_vol_target,
+            price=px,
+            sub_forecasts=subs_best,
+            weights=best_w,
+            capital=capital,
+            pct_vol_target=pct_vol_target,
             vol_lookback_for_position_sizing=vol_lookback_for_position_sizing,
             value_per_point=_get(value_per_point_map, t, 1.0),
             fx_series=None if fx_series_map is None else fx_series_map.get(t),
@@ -1346,7 +1559,11 @@ def optimize_meanrev_trend_vol_fs(
             commission_bps=_get(commission_bps_map, t, 0.0),
             spread_bps=_get(spread_bps_map, t, 0.0),
         )
-        results[t] = {"best_weights": best_w.tolist(), "sharpe": float(best_sr), "rules": R}
+        results[t] = {
+            "best_weights": best_w.tolist(),
+            "sharpe": float(best_sr),
+            "rules": R,
+        }
     return results
 
 
@@ -1360,32 +1577,45 @@ def optimize_meanrev_trend_vol_fs(
 
 
 # =========================
-# Unified signal → sizing → PnL generator (with email_df)
+# Unified signal -> sizing -> PnL generator (with email_df)
 # =========================
 class DummyEmailer:
     def __init__(self):
         self.lines = []
+
     def add_line(self, text: str):
         self.lines.append(str(text))
+
     def summary(self) -> str:
         return "\n".join(self.lines)
 
+
 CARVER_BREAKOUT_SCALARS = {
-    10: 0.60, 20: 0.67, 40: 0.70, 80: 0.73, 160: 0.74, 320: 0.74,
+    10: 0.60,
+    20: 0.67,
+    40: 0.70,
+    80: 0.73,
+    160: 0.74,
+    320: 0.74,
 }
+
 
 def _interp_breakout_scalar(horizon: int, table: dict[int, float]) -> float:
     import math
+
     h = int(horizon)
     keys = sorted(int(k) for k in table.keys())
-    if h <= keys[0]:  return float(table[keys[0]])
-    if h >= keys[-1]: return float(table[keys[-1]])
-    for i in range(len(keys)-1):
-        a, b = keys[i], keys[i+1]
+    if h <= keys[0]:
+        return float(table[keys[0]])
+    if h >= keys[-1]:
+        return float(table[keys[-1]])
+    for i in range(len(keys) - 1):
+        a, b = keys[i], keys[i + 1]
         if a <= h <= b:
             wa = (math.log(h) - math.log(a)) / (math.log(b) - math.log(a))
             return float(table[a] * (1.0 - wa) + table[b] * wa)
     return 1.0
+
 
 def scale_breakout_subforecast(
     sf, horizon, use_carver_scalars=False, scalars_dict=None, cap: float = 20.0
@@ -1405,7 +1635,7 @@ def carver_gen_signal_unified(
     ticker_dict=None,
     optimized_inputs_dict=None,
     rule_variations=None,
-    strategy_type="breakout",          # 'breakout' or 'ewma'
+    strategy_type="breakout",  # 'breakout' or 'ewma'
     vol_lookback_for_position_sizing=500,
     capital=1_000_0.0,
     pct_vol_target=0.20,
@@ -1436,10 +1666,10 @@ def carver_gen_signal_unified(
     # Use a simple progress iterator if tqdm is not available
     try:
         from tqdm.auto import trange, tqdm
+
         _prog = tqdm
     except ImportError:
         _prog = lambda it, **k: it
-
 
     pf = _align_prices(price_frame, tickers)
     signal_dict = {}
@@ -1447,8 +1677,10 @@ def carver_gen_signal_unified(
     email_rows = []
 
     # Resolve external forecast functions if provided/available
-    user_breakout_fn = external_breakout_forecast_fn or _try_resolve("calc_breakout_forecast")
-    user_ewma_fn     = external_ewma_forecast_fn or _try_resolve("calc_ewma_cross_forecast")
+    user_breakout_fn = external_breakout_forecast_fn or _try_resolve(
+        "calc_breakout_forecast"
+    )
+    user_ewma_fn = external_ewma_forecast_fn or _try_resolve("calc_ewma_cross_forecast")
 
     # helpers for per-ticker maps
     def _safe_float(val, default=0.0):
@@ -1474,7 +1706,6 @@ def carver_gen_signal_unified(
     def _spread_bps(t):
         return _safe_float(_get(spread_bps_map, t, 0.0), 0.0)
 
-
     for t in _prog(tickers, desc="Unified run: tickers", disable=not show_progress):
         px = pf[t]
         out_key = (ticker_dict or {}).get(t, t)
@@ -1484,7 +1715,11 @@ def carver_gen_signal_unified(
         subspec = None
         if optimized_inputs_dict and t in optimized_inputs_dict:
             rec = optimized_inputs_dict[t]
-            w = np.array(rec.get("best_weights", []), dtype=float) if "best_weights" in rec else None
+            w = (
+                np.array(rec.get("best_weights", []), dtype=float)
+                if "best_weights" in rec
+                else None
+            )
             # Find the key for rule variations (horizons, pairs, etc.)
             key_options = ["horizons", "pairs", "eq_spans", "rule_params_list"]
             for k in key_options:
@@ -1501,33 +1736,47 @@ def carver_gen_signal_unified(
         strat_lower = strategy_type.lower()
         if strat_lower == "breakout":
             for h in subspec:
-                sf = (user_breakout_fn(px, int(h)) if user_breakout_fn is not None
-                      else _fallback_breakout(px, int(h)))
+                sf = (
+                    user_breakout_fn(px, int(h))
+                    if user_breakout_fn is not None
+                    else _fallback_breakout(px, int(h))
+                )
                 subs_raw.append(pd.Series(sf, index=px.index, dtype=float))
         elif strat_lower == "ewma":
             for f, s in subspec:
-                sf = (user_ewma_fn(px, int(f), int(s)) if user_ewma_fn is not None
-                      else _fallback_ewma_cross(px, int(f), int(s)))
+                sf = (
+                    user_ewma_fn(px, int(f), int(s))
+                    if user_ewma_fn is not None
+                    else _fallback_ewma_cross(px, int(f), int(s))
+                )
                 subs_raw.append(pd.Series(sf, index=px.index, dtype=float))
-        elif strat_lower == 'ewmac_accel':
+        elif strat_lower == "ewmac_accel":
             for n in subspec:
                 subs_raw.append(calc_ewmac_accel_forecast(px, N=int(n)))
-        elif strat_lower == 'meanrev_eq':
+        elif strat_lower == "meanrev_eq":
             for span in subspec:
-                subs_raw.append(calc_meanrev_equilibrium_forecast(px, eq_span=int(span)))
-        elif strat_lower == 'meanrev_trend_vol':
-             for params in subspec:
-                subs_raw.append(calc_meanrev_trend_volmult_forecast(px, rule_params=params))
+                subs_raw.append(
+                    calc_meanrev_equilibrium_forecast(px, eq_span=int(span))
+                )
+        elif strat_lower == "meanrev_trend_vol":
+            for params in subspec:
+                subs_raw.append(
+                    calc_meanrev_trend_volmult_forecast(px, rule_params=params)
+                )
         else:
             raise ValueError(f"Unknown strategy_type: {strategy_type}")
 
-        # Stage 1: scale to abs-10 and cap to ±20
+        # Stage 1: scale to abs-10 and cap to +/-20
         if strat_lower == "breakout" and use_carver_scalars:
             subs = [
                 scale_breakout_subforecast(
-                    sf, int(h), use_carver_scalars=True,
-                    scalars_dict=carver_breakout_scalars, cap=20.0
-                ) for sf, h in zip(subs_raw, subspec)
+                    sf,
+                    int(h),
+                    use_carver_scalars=True,
+                    scalars_dict=carver_breakout_scalars,
+                    cap=20.0,
+                )
+                for sf, h in zip(subs_raw, subspec)
             ]
         elif strat_lower == "meanrev_eq":
             # >>> FIX: use Carver fixed scalar 9.3, not dynamic abs-10
@@ -1572,15 +1821,20 @@ def carver_gen_signal_unified(
             deadband_blocks=buffer_val,
         )
 
-        fx_series = (pd.Series(1.0, index=px.index) if fx_input is None
-                     else pd.Series(fx_input).reindex(px.index).ffill().bfill())
+        fx_series = (
+            pd.Series(1.0, index=px.index)
+            if fx_input is None
+            else pd.Series(fx_input).reindex(px.index).ffill().bfill()
+        )
         gross_pnl = (positions.shift(1) * px.diff() * vpp * fx_series).fillna(0.0)
         ret_series = pd.Series(ret_series).reindex(gross_pnl.index).fillna(0.0)
         pnl_series = (ret_series * float(capital)).fillna(0.0)
         costs_series = (gross_pnl - pnl_series).fillna(0.0)
 
         # Metrics
-        realized_ann_vol = (ret_series.std(ddof=0) * np.sqrt(BUSDAYS)) if len(ret_series) else np.nan
+        realized_ann_vol = (
+            (ret_series.std(ddof=0) * np.sqrt(BUSDAYS)) if len(ret_series) else np.nan
+        )
         ann_return = (ret_series.mean() * BUSDAYS) if len(ret_series) else np.nan
         avg_daily_return = ret_series.mean() if len(ret_series) else np.nan
         std_daily_return = ret_series.std(ddof=0) if len(ret_series) else np.nan
@@ -1596,40 +1850,66 @@ def carver_gen_signal_unified(
                 "returns": ret_series,
                 "costs_ccy": costs_series,
                 "sharpe": float(sharpe) if np.isfinite(sharpe) else np.nan,
-                "realized_ann_vol": float(realized_ann_vol) if np.isfinite(realized_ann_vol) else np.nan,
+                "realized_ann_vol": (
+                    float(realized_ann_vol) if np.isfinite(realized_ann_vol) else np.nan
+                ),
                 "weights": w.tolist(),
                 "rule_variations": subspec,
             }
 
-
         # row for the reporting dataframe
-        email_rows.append({
-            "ticker": out_key,
-            "raw_ticker": t,
-            "strategy": strategy_type.lower(),
-            "start": start_dt,
-            "end": end_dt,
-            "n_bars": n_bars,
-            "capital": float(capital),
-            "pct_vol_target": float(pct_vol_target),
-            "vol_lookback": int(vol_lookback_for_position_sizing),
-            "value_per_point": float(_vpp(t)),
-            "sharpe": float(sharpe) if np.isfinite(sharpe) else np.nan,
-            "realized_ann_vol": float(realized_ann_vol) if np.isfinite(realized_ann_vol) else np.nan,
-            "ann_return": float(ann_return) if np.isfinite(ann_return) else np.nan,
-            "cum_pnl_ccy": float(cum_pnl_ccy),
-            "avg_daily_return": float(avg_daily_return) if np.isfinite(avg_daily_return) else np.nan,
-            "std_daily_return": float(std_daily_return) if np.isfinite(std_daily_return) else np.nan,
-            "weights": json.dumps([round(x,6) for x in w.tolist()]),
-            "rule_variations": json.dumps(subspec),
-        })
+        email_rows.append(
+            {
+                "ticker": out_key,
+                "raw_ticker": t,
+                "strategy": strategy_type.lower(),
+                "start": start_dt,
+                "end": end_dt,
+                "n_bars": n_bars,
+                "capital": float(capital),
+                "pct_vol_target": float(pct_vol_target),
+                "vol_lookback": int(vol_lookback_for_position_sizing),
+                "value_per_point": float(_vpp(t)),
+                "sharpe": float(sharpe) if np.isfinite(sharpe) else np.nan,
+                "realized_ann_vol": (
+                    float(realized_ann_vol) if np.isfinite(realized_ann_vol) else np.nan
+                ),
+                "ann_return": float(ann_return) if np.isfinite(ann_return) else np.nan,
+                "cum_pnl_ccy": float(cum_pnl_ccy),
+                "avg_daily_return": (
+                    float(avg_daily_return) if np.isfinite(avg_daily_return) else np.nan
+                ),
+                "std_daily_return": (
+                    float(std_daily_return) if np.isfinite(std_daily_return) else np.nan
+                ),
+                "weights": json.dumps([round(x, 6) for x in w.tolist()]),
+                "rule_variations": json.dumps(subspec),
+            }
+        )
 
-    email_df = pd.DataFrame(email_rows, columns=[
-        "ticker","raw_ticker","strategy","start","end","n_bars",
-        "capital","pct_vol_target","vol_lookback","value_per_point",
-        "sharpe","realized_ann_vol","ann_return","cum_pnl_ccy",
-        "avg_daily_return","std_daily_return","weights","rule_variations"
-    ])
+    email_df = pd.DataFrame(
+        email_rows,
+        columns=[
+            "ticker",
+            "raw_ticker",
+            "strategy",
+            "start",
+            "end",
+            "n_bars",
+            "capital",
+            "pct_vol_target",
+            "vol_lookback",
+            "value_per_point",
+            "sharpe",
+            "realized_ann_vol",
+            "ann_return",
+            "cum_pnl_ccy",
+            "avg_daily_return",
+            "std_daily_return",
+            "weights",
+            "rule_variations",
+        ],
+    )
 
     return pnl_dict if pnl_dict_gen else {}, signal_dict, email_df
 
@@ -1637,6 +1917,7 @@ def carver_gen_signal_unified(
 ### COst sensitive optimization
 import numpy as np
 import pandas as pd
+
 
 def _apply_buffered_trading_series(target_ru: pd.Series, buffer_ru: float) -> pd.Series:
     """
@@ -1672,16 +1953,21 @@ def _transaction_costs_bps(
 ) -> pd.Series:
     """
     Cost per step in account currency:
-      traded_notional_t = |Δunits_t| * price_t * value_per_point * (fx_t or 1)
+      traded_notional_t = |Deltaunits_t| * price_t * value_per_point * (fx_t or 1)
       bps_paid_t = commission_bps + (spread_bps / 2)
       cost_t = traded_notional_t * bps_paid_t / 10_000
     """
     px = price.astype(float)
-    fx = (fx_series if fx_series is not None else pd.Series(1.0, index=px.index)).astype(float).reindex(px.index).fillna(method="ffill").fillna(1.0)
+    fx = (
+        (fx_series if fx_series is not None else pd.Series(1.0, index=px.index))
+        .astype(float)
+        .reindex(px.index)
+        .fillna(method="ffill")
+        .fillna(1.0)
+    )
     traded_notional = delta_units.abs().astype(float) * px * float(value_per_point) * fx
     bps_paid = float(commission_bps or 0.0) + float(spread_bps or 0.0) / 2.0
     return traded_notional * (bps_paid / 10_000.0)
-
 
 
 def _backtest_ticker_carver_costs(
@@ -1694,15 +1980,15 @@ def _backtest_ticker_carver_costs(
     value_per_point: float = 1.0,
     fx_series: pd.Series | None = None,
     # NEW: Carver buffer + costs
-    buffer_risk_units: float = 0.0,          # e.g., 0.25 risk units
-    commission_bps: float = 0.0,             # per trade (one-way)
-    spread_bps: float = 0.0,                 # average bid-ask width in bps
+    buffer_risk_units: float = 0.0,  # e.g., 0.25 risk units
+    commission_bps: float = 0.0,  # per trade (one-way)
+    spread_bps: float = 0.0,  # average bid-ask width in bps
 ) -> tuple[pd.DataFrame, float]:
     """
     Returns (diagnostics_df, net_sharpe_after_costs).
     - Forecasts are assumed already scaled to +/- 20 and combined using 'weights'.
     - Risk targeting: risk_units = combined_forecast / 10
-    - Costs applied on Δunits_t using commission + half-spread (bps).
+    - Costs applied on Deltaunits_t using commission + half-spread (bps).
     - Buffering applied in risk-units before converting to units.
     """
     # align everything
@@ -1735,14 +2021,28 @@ def _backtest_ticker_carver_costs(
 
     # convert risk-units to actual units of the instrument
     # position = vol_scalar * (forecast / 10) = vol_scalar * risk_units
-    units = (vol_scalar * executed_ru).replace([np.inf, -np.inf], np.nan).ffill().fillna(0.0).rename("position_units")
+    units = (
+        (vol_scalar * executed_ru)
+        .replace([np.inf, -np.inf], np.nan)
+        .ffill()
+        .fillna(0.0)
+        .rename("position_units")
+    )
 
     # PnL gross (account ccy)
-    fx = (fx_series if fx_series is not None else pd.Series(1.0, index=idx)).astype(float).reindex(idx).fillna(method="ffill").fillna(1.0)
+    fx = (
+        (fx_series if fx_series is not None else pd.Series(1.0, index=idx))
+        .astype(float)
+        .reindex(idx)
+        .fillna(method="ffill")
+        .fillna(1.0)
+    )
     dP = price.diff()
-    pnl_gross = (units.shift(1).fillna(0.0) * dP * float(value_per_point) * fx).rename("pnl_gross")
+    pnl_gross = (units.shift(1).fillna(0.0) * dP * float(value_per_point) * fx).rename(
+        "pnl_gross"
+    )
 
-    # trading costs on Δunits
+    # trading costs on Deltaunits
     delta_units = units.diff().fillna(units)  # include initial entry
     costs = _transaction_costs_bps(
         price=price,
@@ -1762,8 +2062,19 @@ def _backtest_ticker_carver_costs(
     else:
         sharpe = (ret.mean() / ret.std(ddof=0)) * np.sqrt(BUSDAYS)
 
-
-    diag = pd.concat([price.rename("price"), combined, target_ru, executed_ru, units, pnl_gross, costs, pnl_net], axis=1)
+    diag = pd.concat(
+        [
+            price.rename("price"),
+            combined,
+            target_ru,
+            executed_ru,
+            units,
+            pnl_gross,
+            costs,
+            pnl_net,
+        ],
+        axis=1,
+    )
 
     return diag, sharpe
 
@@ -1798,7 +2109,9 @@ def optimize_breakout_weights_carver_cost(
     results: dict[str, dict] = {}
     sampler = TPESampler(seed=random_seed)
 
-    user_breakout_fn = external_breakout_forecast_fn or _try_resolve("calc_breakout_forecast")
+    user_breakout_fn = external_breakout_forecast_fn or _try_resolve(
+        "calc_breakout_forecast"
+    )
 
     # Resolve cost lookups (scalar or per-ticker map)
     def _get(map_or_scalar, t, default=0.0):
@@ -1814,17 +2127,21 @@ def optimize_breakout_weights_carver_cost(
         # build and scale sub-forecasts
         subs_raw = []
         for h in breakout_horizons:
-            sf = (user_breakout_fn(px, int(h)) if user_breakout_fn is not None
-                  else _fallback_breakout(px, int(h)))
+            sf = (
+                user_breakout_fn(px, int(h))
+                if user_breakout_fn is not None
+                else _fallback_breakout(px, int(h))
+            )
             subs_raw.append(pd.Series(sf, index=px.index, dtype=float))
 
         if use_carver_scalars and "scale_breakout_subforecast" in globals():
             subs = [
                 scale_breakout_subforecast(
-                    sf, int(h),
+                    sf,
+                    int(h),
                     use_carver_scalars=True,
                     scalars_dict=carver_breakout_scalars,
-                    cap=20.0
+                    cap=20.0,
                 )
                 for sf, h in zip(subs_raw, breakout_horizons)
             ]
@@ -1837,7 +2154,10 @@ def optimize_breakout_weights_carver_cost(
         sprd_bps = _get(spread_bps_map, t, default=0.0)
 
         def objective(trial: "optuna.trial.Trial") -> float:
-            w = np.array([trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(subs))], dtype=float)
+            w = np.array(
+                [trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(subs))],
+                dtype=float,
+            )
             if w.sum() == 0.0:
                 w[:] = 1.0
             _, sr = _backtest_ticker_carver_costs(
@@ -1849,7 +2169,7 @@ def optimize_breakout_weights_carver_cost(
                 vol_lookback_for_position_sizing=vol_lookback_for_position_sizing,
                 value_per_point=vpp,
                 fx_series=fx_series,
-                # costs + buffer → NET Sharpe
+                # costs + buffer -> NET Sharpe
                 buffer_risk_units=buffer_risk_units,
                 commission_bps=comm_bps,
                 spread_bps=sprd_bps,
@@ -1861,21 +2181,24 @@ def optimize_breakout_weights_carver_cost(
         study = optuna.create_study(direction="maximize", sampler=sampler)
         with _optuna_quiet(silent):
             _study_optimize_quiet(
-                study, objective,
+                study,
+                objective,
                 n_trials=n_trials_per_ticker,
                 n_jobs=n_jobs,
-                show_progress_bar=show_progress_bar
+                show_progress_bar=show_progress_bar,
             )
 
         best_params = study.best_trial.params
-        raw = np.array([best_params.get(f"w_{i}", 0.0) for i in range(len(subs))], dtype=float)
+        raw = np.array(
+            [best_params.get(f"w_{i}", 0.0) for i in range(len(subs))], dtype=float
+        )
         if raw.sum() == 0.0:
             raw[:] = 1.0
         best_w = (raw / raw.sum()).tolist()
 
         results[t] = {
             "best_weights": best_w,
-            "sharpe": float(study.best_value),            # NET after costs
+            "sharpe": float(study.best_value),  # NET after costs
             "horizons": list(map(int, breakout_horizons)),
             "buffer_risk_units": float(buffer_risk_units),
             "commission_bps": float(comm_bps),
@@ -1883,6 +2206,7 @@ def optimize_breakout_weights_carver_cost(
         }
 
     return results
+
 
 # =========================
 # NEW: OPTUNA optimizer: EWMA cross with costs (quiet)
@@ -1921,8 +2245,10 @@ def optimize_ewma_cross_weights_carver_cost(
     user_ewma_fn = external_ewma_forecast_fn or _try_resolve("calc_ewma_cross_forecast")
 
     def _get(map_or_scalar, t, default=0.0):
-        if map_or_scalar is None: return default
-        if isinstance(map_or_scalar, dict): return float(map_or_scalar.get(t, default))
+        if map_or_scalar is None:
+            return default
+        if isinstance(map_or_scalar, dict):
+            return float(map_or_scalar.get(t, default))
         return float(map_or_scalar)
 
     for t in tickers:
@@ -1930,8 +2256,11 @@ def optimize_ewma_cross_weights_carver_cost(
 
         subs_raw = []
         for f, s in ewma_pairs:
-            sf = (user_ewma_fn(px, int(f), int(s)) if user_ewma_fn is not None
-                  else _fallback_ewma_cross(px, int(f), int(s)))
+            sf = (
+                user_ewma_fn(px, int(f), int(s))
+                if user_ewma_fn is not None
+                else _fallback_ewma_cross(px, int(f), int(s))
+            )
             subs_raw.append(pd.Series(sf, index=px.index, dtype=float))
 
         subs = [scale_and_cap_subforecast_abs10(sf, cap=20.0) for sf in subs_raw]
@@ -1942,9 +2271,13 @@ def optimize_ewma_cross_weights_carver_cost(
         sprd_bps = _get(spread_bps_map, t, default=0.0)
 
         def objective(trial: "optuna.trial.Trial") -> float:
-            w = np.array([trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(subs))], dtype=float)
-            if w.sum() == 0.0: w[:] = 1.0
-            
+            w = np.array(
+                [trial.suggest_float(f"w_{i}", 0.0, 1.0) for i in range(len(subs))],
+                dtype=float,
+            )
+            if w.sum() == 0.0:
+                w[:] = 1.0
+
             _, sr = _backtest_ticker_carver_costs(
                 price=px,
                 sub_forecasts=subs,
@@ -1962,11 +2295,16 @@ def optimize_ewma_cross_weights_carver_cost(
 
         study = optuna.create_study(direction="maximize", sampler=sampler)
         with _optuna_quiet(silent):
-            _study_optimize_quiet(study, objective, n_trials_per_ticker, n_jobs, show_progress_bar)
+            _study_optimize_quiet(
+                study, objective, n_trials_per_ticker, n_jobs, show_progress_bar
+            )
 
         best_params = study.best_trial.params
-        raw = np.array([best_params.get(f"w_{i}", 0.0) for i in range(len(subs))], dtype=float)
-        if raw.sum() == 0.0: raw[:] = 1.0
+        raw = np.array(
+            [best_params.get(f"w_{i}", 0.0) for i in range(len(subs))], dtype=float
+        )
+        if raw.sum() == 0.0:
+            raw[:] = 1.0
         best_w = (raw / raw.sum()).tolist()
 
         results[t] = {
@@ -1978,6 +2316,7 @@ def optimize_ewma_cross_weights_carver_cost(
             "spread_bps": float(sprd_bps),
         }
     return results
+
 
 # =========================
 # Vol-target sweep & heatmap
@@ -1991,11 +2330,15 @@ import plotly.graph_objects as go
 try:
     from tqdm.auto import tqdm
 except Exception:
-    def tqdm(x, **k): return x
+
+    def tqdm(x, **k):
+        return x
 
 
 # ---------------- Plot helper (yours) ----------------
-def plot_sensitivity_with_plotly(results_df: pd.DataFrame, parameter_name: str, metric_name: str):
+def plot_sensitivity_with_plotly(
+    results_df: pd.DataFrame, parameter_name: str, metric_name: str
+):
     """
     Creates an interactive Plotly chart to visualize sensitivity analysis results.
 
@@ -2007,33 +2350,37 @@ def plot_sensitivity_with_plotly(results_df: pd.DataFrame, parameter_name: str, 
     fig = go.Figure()
 
     # Add the line and markers trace
-    fig.add_trace(go.Scatter(
-        x=results_df[parameter_name],
-        y=results_df[metric_name],
-        mode='lines+markers+text',
-        name=metric_name.replace('_', ' ').title(),
-        text=results_df[metric_name].apply(lambda x: f'{x:.2f}' if pd.notnull(x) else ''),
-        textposition="top center",
-        marker=dict(size=8),
-        line=dict(width=2)
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=results_df[parameter_name],
+            y=results_df[metric_name],
+            mode="lines+markers+text",
+            name=metric_name.replace("_", " ").title(),
+            text=results_df[metric_name].apply(
+                lambda x: f"{x:.2f}" if pd.notnull(x) else ""
+            ),
+            textposition="top center",
+            marker=dict(size=8),
+            line=dict(width=2),
+        )
+    )
 
     # Customize layout
     fig.update_layout(
-        title=dict(text=f'Strategy Sensitivity to {parameter_name.replace("_", " ").title()}', x=0.5),
+        title=dict(
+            text=f'Strategy Sensitivity to {parameter_name.replace("_", " ").title()}',
+            x=0.5,
+        ),
         xaxis_title=parameter_name.replace("_", " ").title(),
         yaxis_title=metric_name.replace("_", " ").title(),
         width=1000,
         height=600,
         hovermode="x unified",
-        template="plotly_white"
+        template="plotly_white",
     )
 
     # Ensure all tested parameter values are shown on the x-axis
-    fig.update_xaxes(
-        tickmode='array',
-        tickvals=results_df[parameter_name]
-    )
+    fig.update_xaxes(tickmode="array", tickvals=results_df[parameter_name])
 
     print("Displaying interactive sensitivity analysis plot...")
     fig.show()
@@ -2051,7 +2398,7 @@ def _to_frac_vol(x) -> float:
         v = float(s)
     else:
         v = float(x)
-    return v/100.0 if v > 1.5 else v
+    return v / 100.0 if v > 1.5 else v
 
 
 def _get_email_df_from_run_backtest_output(out):
@@ -2082,11 +2429,11 @@ def run_volatility_lookback_sensitivity_bt(
     fx_map: dict[str, pd.Series] | None = None,
     use_carver_scalars: bool = True,
     carver_breakout_scalars: dict[int, float] | None = None,
-    optimized_params: dict | None = None,      # pass pre-optimized weights if you have them
-    n_trials_if_optimize: int = 80,            # used only if optimized_params is None
+    optimized_params: dict | None = None,  # pass pre-optimized weights if you have them
+    n_trials_if_optimize: int = 80,  # used only if optimized_params is None
     show_plot: bool = True,
     show_progress: bool = True,
-    BacktestClass=None,                        # pass bt.CarverBacktest if you didn't import as bt
+    BacktestClass=None,  # pass bt.CarverBacktest if you didn't import as bt
 ) -> pd.DataFrame:
     """
     Sweep vol_lookback_for_position_sizing and compute average/median Sharpe across tickers
@@ -2097,9 +2444,12 @@ def run_volatility_lookback_sensitivity_bt(
     if BacktestClass is None:
         try:
             import backtester as bt
+
             BacktestClass = bt.CarverBacktest
         except Exception:
-            BacktestClass = globals().get("CarverBacktest") or globals()["bt"].CarverBacktest
+            BacktestClass = (
+                globals().get("CarverBacktest") or globals()["bt"].CarverBacktest
+            )
 
     if vol_lookbacks_to_test is None:
         vol_lookbacks_to_test = list(range(30, 360, 10))
@@ -2107,7 +2457,9 @@ def run_volatility_lookback_sensitivity_bt(
     pct_vol_target = _to_frac_vol(pct_vol_target)
     results = []
 
-    iterator = tqdm(vol_lookbacks_to_test, desc="Vol lookback sweep", disable=not show_progress)
+    iterator = tqdm(
+        vol_lookbacks_to_test, desc="Vol lookback sweep", disable=not show_progress
+    )
     for lookback in iterator:
         runner = BacktestClass(
             price_frame=price_frame,
@@ -2126,7 +2478,9 @@ def run_volatility_lookback_sensitivity_bt(
         if optimized_params is None:
             # quick/quiet optimize just to get reasonable weights
             try:
-                runner.run_optimization(n_trials=n_trials_if_optimize, show_progress_bar=False)
+                runner.run_optimization(
+                    n_trials=n_trials_if_optimize, show_progress_bar=False
+                )
             except Exception:
                 pass
         else:
@@ -2142,13 +2496,17 @@ def run_volatility_lookback_sensitivity_bt(
             avg_sr = np.nan
             med_sr = np.nan
 
-        results.append({
-            "vol_lookback": int(lookback),
-            "average_sharpe": avg_sr,
-            "median_sharpe": med_sr,
-        })
+        results.append(
+            {
+                "vol_lookback": int(lookback),
+                "average_sharpe": avg_sr,
+                "median_sharpe": med_sr,
+            }
+        )
 
-    results_df = pd.DataFrame(results).sort_values("vol_lookback").reset_index(drop=True)
+    results_df = (
+        pd.DataFrame(results).sort_values("vol_lookback").reset_index(drop=True)
+    )
 
     if show_plot and not results_df.empty:
         # You can call once for median and once for average
@@ -2164,7 +2522,9 @@ def run_vol_target_sensitivity_bt(
     strategy_type: str,
     rule_variations,
     *,
-    vol_targets_to_test: list[float] | None = None,  # e.g. [10,15,20] or [0.10,0.15,0.20]
+    vol_targets_to_test: (
+        list[float] | None
+    ) = None,  # e.g. [10,15,20] or [0.10,0.15,0.20]
     vol_lookback_for_position_sizing: int = 500,
     capital: float = 1_000_000.0,
     value_per_point_map: dict[str, float] | None = None,
@@ -2184,9 +2544,12 @@ def run_vol_target_sensitivity_bt(
     if BacktestClass is None:
         try:
             import backtester as bt
+
             BacktestClass = bt.CarverBacktest
         except Exception:
-            BacktestClass = globals().get("CarverBacktest") or globals()["bt"].CarverBacktest
+            BacktestClass = (
+                globals().get("CarverBacktest") or globals()["bt"].CarverBacktest
+            )
 
     if vol_targets_to_test is None:
         vol_targets_to_test = [10, 12, 15, 18, 20, 22, 25, 30]  # % p.a.
@@ -2194,7 +2557,9 @@ def run_vol_target_sensitivity_bt(
     vol_targets_frac = [_to_frac_vol(v) for v in vol_targets_to_test]
     results = []
 
-    iterator = tqdm(vol_targets_frac, desc="Vol target sweep", disable=not show_progress)
+    iterator = tqdm(
+        vol_targets_frac, desc="Vol target sweep", disable=not show_progress
+    )
     for vt in iterator:
         runner = BacktestClass(
             price_frame=price_frame,
@@ -2212,7 +2577,9 @@ def run_vol_target_sensitivity_bt(
 
         if optimized_params is None:
             try:
-                runner.run_optimization(n_trials=n_trials_if_optimize, show_progress_bar=False)
+                runner.run_optimization(
+                    n_trials=n_trials_if_optimize, show_progress_bar=False
+                )
             except Exception:
                 pass
         else:
@@ -2228,14 +2595,18 @@ def run_vol_target_sensitivity_bt(
             avg_sr = np.nan
             med_sr = np.nan
 
-        results.append({
-            "pct_vol_target": float(vt),
-            "pct_vol_target_pct": round(vt * 100.0, 2),
-            "average_sharpe": avg_sr,
-            "median_sharpe": med_sr,
-        })
+        results.append(
+            {
+                "pct_vol_target": float(vt),
+                "pct_vol_target_pct": round(vt * 100.0, 2),
+                "average_sharpe": avg_sr,
+                "median_sharpe": med_sr,
+            }
+        )
 
-    results_df = pd.DataFrame(results).sort_values("pct_vol_target").reset_index(drop=True)
+    results_df = (
+        pd.DataFrame(results).sort_values("pct_vol_target").reset_index(drop=True)
+    )
 
     if show_plot and not results_df.empty:
         # Plot against the % label column so the x-axis is intuitive
@@ -2253,10 +2624,10 @@ import pickle
 from typing import List, Dict, Any, Tuple
 
 
-
 def _horizons_tag(horizons: List[int]) -> str:
     """Turn [10,20,40,80,160] -> '10_20_40_80_160'."""
     return "_".join(str(int(h)) for h in horizons)
+
 
 def _vol_token(pct_vol_target) -> str:
     """
@@ -2276,6 +2647,7 @@ def _vol_token(pct_vol_target) -> str:
     vol_int = int(round(v_percent))
     return f"vol{vol_int}"  # e.g., 'vol80'
 
+
 def _build_filepattern(
     directory: str,
     file_prefix: str,
@@ -2292,18 +2664,19 @@ def _build_filepattern(
     horizons_str = _horizons_tag(horizons)
     vol_tok = _vol_token(pct_vol_target)
 
-    pat1  = os.path.join(dir_abs, f"{file_prefix}{horizons_str}_{vol_tok}_*.pkl")
+    pat1 = os.path.join(dir_abs, f"{file_prefix}{horizons_str}_{vol_tok}_*.pkl")
     pat1b = os.path.join(dir_abs, f"{file_prefix}{horizons_str}_{vol_tok}-*.pkl")
 
     # Fallback to decimal style if you ever saved that way
     vol_dec = f"vol{(float(pct_vol_target) if not isinstance(pct_vol_target, str) else pct_vol_target)}"
-    pat2  = os.path.join(dir_abs, f"{file_prefix}{horizons_str}_{vol_dec}_*.pkl")
+    pat2 = os.path.join(dir_abs, f"{file_prefix}{horizons_str}_{vol_dec}_*.pkl")
     pat2b = os.path.join(dir_abs, f"{file_prefix}{horizons_str}_{vol_dec}-*.pkl")
 
     for pat in (pat1, pat1b, pat2, pat2b):
         if glob.glob(pat):
             return pat
     return pat1
+
 
 def _load_pickle_safe(path: str):
     try:
@@ -2312,6 +2685,7 @@ def _load_pickle_safe(path: str):
     except Exception as e:
         print(f"[WARN] Could not load {path}: {e}")
         return None
+
 
 # ---------- analysis ----------
 def analyze_lookback_sharpe_heatmap(
@@ -2356,45 +2730,80 @@ def analyze_lookback_sharpe_heatmap(
         for t in tickers:
             if t in res and isinstance(res[t], dict):
                 sr = res[t].get("sharpe", np.nan)
-                sharpe_grid.loc[t, lb] = float(sr) if pd.notnull(sr) and np.isfinite(sr) else np.nan
+                sharpe_grid.loc[t, lb] = (
+                    float(sr) if pd.notnull(sr) and np.isfinite(sr) else np.nan
+                )
 
-    summary_df = pd.DataFrame({
-        "lookback": sharpe_grid.columns.values,
-        "median_sharpe": sharpe_grid.median(axis=0, skipna=True).values,
-        "average_sharpe": sharpe_grid.mean(axis=0, skipna=True).values,
-    }).sort_values("lookback").reset_index(drop=True)
+    summary_df = (
+        pd.DataFrame(
+            {
+                "lookback": sharpe_grid.columns.values,
+                "median_sharpe": sharpe_grid.median(axis=0, skipna=True).values,
+                "average_sharpe": sharpe_grid.mean(axis=0, skipna=True).values,
+            }
+        )
+        .sort_values("lookback")
+        .reset_index(drop=True)
+    )
 
     heatmap_fig, median_fig = None, None
     if show_heatmap and not sharpe_grid.empty:
-        heatmap_fig = go.Figure(data=go.Heatmap(
-            z=sharpe_grid.values, x=sharpe_grid.columns.astype(int).tolist(),
-            y=sharpe_grid.index.tolist(), colorbar=dict(title="Sharpe"), zauto=True
-        ))
+        heatmap_fig = go.Figure(
+            data=go.Heatmap(
+                z=sharpe_grid.values,
+                x=sharpe_grid.columns.astype(int).tolist(),
+                y=sharpe_grid.index.tolist(),
+                colorbar=dict(title="Sharpe"),
+                zauto=True,
+            )
+        )
         heatmap_fig.update_layout(
             title=f"Sharpe by Ticker vs Lookback ({_vol_token(pct_vol_target)}, horizons={_horizons_tag(horizons)})",
-            xaxis_title="vol_lookback_for_position_sizing", yaxis_title="ticker",
-            template="plotly_white", width=1100, height=600 + 8 * len(tickers)
+            xaxis_title="vol_lookback_for_position_sizing",
+            yaxis_title="ticker",
+            template="plotly_white",
+            width=1100,
+            height=600 + 8 * len(tickers),
         )
         heatmap_fig.show()
 
     if also_plot_median_line and not summary_df.empty:
         median_fig = go.Figure()
-        median_fig.add_trace(go.Scatter(
-            x=summary_df["lookback"], y=summary_df["median_sharpe"], mode="lines+markers+text",
-            text=summary_df["median_sharpe"].apply(lambda v: f"{v:.2f}" if pd.notnull(v) else ""),
-            textposition="top center", name="Median Sharpe", line=dict(width=2)
-        ))
-        median_fig.add_trace(go.Scatter(
-            x=summary_df["lookback"], y=summary_df["average_sharpe"], mode="lines+markers",
-            name="Average Sharpe", line=dict(width=2, dash="dash")
-        ))
+        median_fig.add_trace(
+            go.Scatter(
+                x=summary_df["lookback"],
+                y=summary_df["median_sharpe"],
+                mode="lines+markers+text",
+                text=summary_df["median_sharpe"].apply(
+                    lambda v: f"{v:.2f}" if pd.notnull(v) else ""
+                ),
+                textposition="top center",
+                name="Median Sharpe",
+                line=dict(width=2),
+            )
+        )
+        median_fig.add_trace(
+            go.Scatter(
+                x=summary_df["lookback"],
+                y=summary_df["average_sharpe"],
+                mode="lines+markers",
+                name="Average Sharpe",
+                line=dict(width=2, dash="dash"),
+            )
+        )
         median_fig.update_layout(
-            title="Sharpe vs Lookback (Median & Average)", xaxis_title="vol_lookback_for_position_sizing",
-            yaxis_title="Sharpe", template="plotly_white", width=1000, height=500, hovermode="x unified"
+            title="Sharpe vs Lookback (Median & Average)",
+            xaxis_title="vol_lookback_for_position_sizing",
+            yaxis_title="Sharpe",
+            template="plotly_white",
+            width=1000,
+            height=500,
+            hovermode="x unified",
         )
         median_fig.show()
 
     return sharpe_grid, summary_df, heatmap_fig, median_fig
+
 
 def select_best_params_across_lookbacks(
     directory: str,
@@ -2450,9 +2859,11 @@ def select_best_params_across_lookbacks(
     print(f"[INFO] Selected best parameters for {len(best)} / {len(tickers)} tickers.")
     return best
 
+
 # ======================================================================================
-# NEW: Backtest Class for structured execution and optimization
+# Backtest Class for structured execution and optimization
 # ======================================================================================
+
 
 class CarverBacktest:
     """
@@ -2486,8 +2897,15 @@ class CarverBacktest:
     print(bt.get_summary())
     spy_pnl = bt.pnl_dict['SPY']['pnl_ccy']
     """
-    def __init__(self, price_frame: pd.DataFrame, tickers: List[str],
-                 strategy_type: str, rule_variations: List, **kwargs):
+
+    def __init__(
+        self,
+        price_frame: pd.DataFrame,
+        tickers: List[str],
+        strategy_type: str,
+        rule_variations: List,
+        **kwargs,
+    ):
         """
         Initializes the backtest environment.
 
@@ -2504,26 +2922,26 @@ class CarverBacktest:
         self.rule_variations = rule_variations
 
         # Core backtest params
-        self.capital = float(kwargs.get('capital', 1_000_000.0))
-        self.pct_vol_target = float(kwargs.get('pct_vol_target', 0.20))
-        self.vol_lookback = int(kwargs.get('vol_lookback_for_position_sizing', 365))
+        self.capital = float(kwargs.get("capital", 1_000_000.0))
+        self.pct_vol_target = float(kwargs.get("pct_vol_target", 0.20))
+        self.vol_lookback = int(kwargs.get("vol_lookback_for_position_sizing", 365))
 
         # Data maps
-        self.value_per_point_map = kwargs.get('value_per_point_map')
-        self.fx_map = kwargs.get('fx_map')
-        self.ticker_dict = kwargs.get('ticker_dict')
+        self.value_per_point_map = kwargs.get("value_per_point_map")
+        self.fx_map = kwargs.get("fx_map")
+        self.ticker_dict = kwargs.get("ticker_dict")
 
         # Cost params
-        self.buffer_ru = kwargs.get('buffer_risk_units', 0.0)
-        self.commission_bps = kwargs.get('commission_bps_map')
-        self.spread_bps = kwargs.get('spread_bps_map')
+        self.buffer_ru = kwargs.get("buffer_risk_units", 0.0)
+        self.commission_bps = kwargs.get("commission_bps_map")
+        self.spread_bps = kwargs.get("spread_bps_map")
 
         # External functions & breakout-specific scalars
-        self.breakout_fn = kwargs.get('external_breakout_forecast_fn')
-        self.ewma_fn = kwargs.get('external_ewma_forecast_fn')
-        self.use_carver_scalars = bool(kwargs.get('use_carver_scalars', False))
-        self.carver_breakout_scalars = kwargs.get('carver_breakout_scalars')
-        
+        self.breakout_fn = kwargs.get("external_breakout_forecast_fn")
+        self.ewma_fn = kwargs.get("external_ewma_forecast_fn")
+        self.use_carver_scalars = bool(kwargs.get("use_carver_scalars", False))
+        self.carver_breakout_scalars = kwargs.get("carver_breakout_scalars")
+
         # Results attributes
         self.optimized_params: Optional[Dict] = None
         self.pnl_dict: Optional[Dict] = None
@@ -2531,11 +2949,16 @@ class CarverBacktest:
         self.summary_df: Optional[pd.DataFrame] = None
         self.position_dict: Optional[Dict[str, pd.Series]] = None
 
-    def run_optimization(self, n_trials: int = 250, random_seed: int = 42,
-                         n_jobs: Optional[int] = -1, show_progress_bar: bool = False) -> Dict:
+    def run_optimization(
+        self,
+        n_trials: int = 250,
+        random_seed: int = 42,
+        n_jobs: Optional[int] = -1,
+        show_progress_bar: bool = False,
+    ) -> Dict:
         """
         Runs Optuna optimization to find the best weights for the specified strategy.
-        
+
         It automatically detects whether to run a cost-aware optimization based on
         whether cost parameters were provided during initialization.
 
@@ -2544,10 +2967,11 @@ class CarverBacktest:
             random_seed (int): Seed for reproducibility.
             n_jobs (int, optional): Number of parallel jobs for Optuna. Defaults to -1 (all CPUs).
             show_progress_bar (bool): Whether to show Optuna's progress bar.
-        
+
         Returns:
             Dict: A dictionary of optimized parameters for each ticker.
         """
+
         def _has_buffer_cost(val):
             if val is None:
                 return False
@@ -2566,7 +2990,7 @@ class CarverBacktest:
             or self.commission_bps is not None
             or self.spread_bps is not None
         )
-        
+
         common_args = {
             "price_frame": self.price_frame,
             "tickers": self.tickers,
@@ -2581,59 +3005,83 @@ class CarverBacktest:
             "n_jobs": n_jobs,
             "show_progress_bar": show_progress_bar,
         }
-        
+
         cost_args = {
             "buffer_risk_units": self.buffer_ru,
             "commission_bps_map": self.commission_bps,
             "spread_bps_map": self.spread_bps,
         }
-        
-        strat_lower = self.strategy_type.lower()
-        
-        if strat_lower in ['meanrev_eq', 'meanrev_trend_vol'] and has_costs:
-            # remap to the *_map* key that these optimizers expect
-            common_args.update({
-                "buffer_risk_units_map": self.buffer_ru,
-                "commission_bps_map": self.commission_bps,
-                "spread_bps_map": self.spread_bps,
-            })
 
-        if strat_lower == 'breakout':
-            optimizer = optimize_breakout_weights_carver_cost if has_costs else optimize_breakout_weights_carver
-            if has_costs: common_args.update(cost_args)
+        strat_lower = self.strategy_type.lower()
+
+        if strat_lower in ["meanrev_eq", "meanrev_trend_vol"] and has_costs:
+            # remap to the *_map* key that these optimizers expect
+            common_args.update(
+                {
+                    "buffer_risk_units_map": self.buffer_ru,
+                    "commission_bps_map": self.commission_bps,
+                    "spread_bps_map": self.spread_bps,
+                }
+            )
+
+        if strat_lower == "breakout":
+            optimizer = (
+                optimize_breakout_weights_carver_cost
+                if has_costs
+                else optimize_breakout_weights_carver
+            )
+            if has_costs:
+                common_args.update(cost_args)
             self.optimized_params = optimizer(
                 breakout_horizons=self.rule_variations,
                 external_breakout_forecast_fn=self.breakout_fn,
                 use_carver_scalars=self.use_carver_scalars,
                 carver_breakout_scalars=self.carver_breakout_scalars,
-                **common_args
+                **common_args,
             )
-        elif strat_lower == 'ewma':
-            optimizer = optimize_ewma_cross_weights_carver_cost if has_costs else optimize_ewma_cross_weights_carver
-            if has_costs: common_args.update(cost_args)
+        elif strat_lower == "ewma":
+            optimizer = (
+                optimize_ewma_cross_weights_carver_cost
+                if has_costs
+                else optimize_ewma_cross_weights_carver
+            )
+            if has_costs:
+                common_args.update(cost_args)
             self.optimized_params = optimizer(
                 ewma_pairs=self.rule_variations,
                 external_ewma_forecast_fn=self.ewma_fn,
-                **common_args
+                **common_args,
             )
-        elif strat_lower in ['ewmac_accel', 'meanrev_eq', 'meanrev_trend_vol']:
+        elif strat_lower in ["ewmac_accel", "meanrev_eq", "meanrev_trend_vol"]:
             # For now, new strategies use the non-cost-sensitive generic optimizer
             # A cost-sensitive generic optimizer could be added if needed
-            if strat_lower == 'ewmac_accel':
-                if has_costs: common_args.update(cost_args)
-                self.optimized_params = optimize_ewmac_accel_weights_carver(rule_variations=self.rule_variations, **common_args)
+            if strat_lower == "ewmac_accel":
+                if has_costs:
+                    common_args.update(cost_args)
+                self.optimized_params = optimize_ewmac_accel_weights_carver(
+                    rule_variations=self.rule_variations, **common_args
+                )
 
-            elif strat_lower == 'meanrev_eq':
-                self.optimized_params = optimize_meanrev_eq_optuna_fs(mr_eq_spans=self.rule_variations, **common_args)
-            elif strat_lower == 'meanrev_trend_vol':
-                 if has_costs: common_args.update(cost_args)
-                 self.optimized_params = optimize_meanrev_trend_vol_fs(rule_variations=self.rule_variations, **common_args)
+            elif strat_lower == "meanrev_eq":
+                self.optimized_params = optimize_meanrev_eq_optuna_fs(
+                    mr_eq_spans=self.rule_variations, **common_args
+                )
+            elif strat_lower == "meanrev_trend_vol":
+                if has_costs:
+                    common_args.update(cost_args)
+                self.optimized_params = optimize_meanrev_trend_vol_fs(
+                    rule_variations=self.rule_variations, **common_args
+                )
         else:
-            raise ValueError(f"Unknown strategy_type for optimization: {self.strategy_type}")
-            
+            raise ValueError(
+                f"Unknown strategy_type for optimization: {self.strategy_type}"
+            )
+
         return self.optimized_params
 
-    def run(self, optimized_params: Optional[Dict] = None, show_progress: bool = True) -> Tuple[Dict, Dict, pd.DataFrame]:
+    def run(
+        self, optimized_params: Optional[Dict] = None, show_progress: bool = True
+    ) -> Tuple[Dict, Dict, pd.DataFrame]:
         """
         Executes the backtest using the stored configuration.
 
@@ -2652,8 +3100,12 @@ class CarverBacktest:
                 - summary_df: A DataFrame with key performance metrics per ticker.
         """
         # Use class's optimized params if available, otherwise use provided arg
-        params_to_use = self.optimized_params if self.optimized_params is not None else optimized_params
-        
+        params_to_use = (
+            self.optimized_params
+            if self.optimized_params is not None
+            else optimized_params
+        )
+
         pnl_dict, signal_dict, summary_df = carver_gen_signal_unified(
             price_frame=self.price_frame,
             tickers=self.tickers,
@@ -2676,7 +3128,7 @@ class CarverBacktest:
             use_carver_scalars=self.use_carver_scalars,
             carver_breakout_scalars=self.carver_breakout_scalars,
         )
-        
+
         # Store results
         self.pnl_dict = pnl_dict
         self.signal_dict = signal_dict
@@ -2692,10 +3144,15 @@ class CarverBacktest:
     def get_summary(self) -> Optional[pd.DataFrame]:
         """Returns the summary DataFrame from the last run."""
         if self.summary_df is None:
-            print("No summary available. Please run the backtest first using the .run() method.")
+            print(
+                "No summary available. Please run the backtest first using the .run() method."
+            )
         return self.summary_df
 
-def plot_final_results(backtest_runner: CarverBacktest, optimized_params: dict, ticker: str):
+
+def plot_final_results(
+    backtest_runner: CarverBacktest, optimized_params: dict, ticker: str
+):
     """
     Runs the backtest with optimal parameters and plots the PnL curve, signal,
     and price for a single specified ticker.
@@ -2705,23 +3162,25 @@ def plot_final_results(backtest_runner: CarverBacktest, optimized_params: dict, 
         optimized_params (dict): The dictionary of optimized parameters from .run_optimization().
         ticker (str): The specific ticker to plot.
     """
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print(f"### Generating Final Results Plot for Ticker: {ticker} ###")
-    print("="*50)
+    print("=" * 50)
 
     if ticker not in backtest_runner.tickers:
         print(f"Error: Ticker '{ticker}' not found in the backtest instance.")
         return
-        
+
     if ticker not in optimized_params:
         print(f"Error: Optimized parameters for ticker '{ticker}' not found.")
         return
 
     # 1. Run the backtest to generate PnL and signal data with optimal weights
-    pnl_dict, signal_dict, _ = backtest_runner.run(optimized_params=optimized_params, show_progress=False)
+    pnl_dict, signal_dict, _ = backtest_runner.run(
+        optimized_params=optimized_params, show_progress=False
+    )
 
     # 2. Extract the relevant data for the chosen ticker
-    ticker_pnl = pnl_dict.get(ticker, {}).get('pnl_ccy')
+    ticker_pnl = pnl_dict.get(ticker, {}).get("pnl_ccy")
     ticker_signal = signal_dict.get(ticker)
     ticker_price = backtest_runner.price_frame[ticker]
 
@@ -2732,18 +3191,20 @@ def plot_final_results(backtest_runner: CarverBacktest, optimized_params: dict, 
     # 3. Print the optimal parameters found for this ticker
     optimal_info = optimized_params[ticker]
     print(f"Optimal Parameters for {ticker}:")
-    sharpe_val = optimal_info.get('sharpe')
+    sharpe_val = optimal_info.get("sharpe")
     if isinstance(sharpe_val, (int, float, np.floating)) and np.isfinite(sharpe_val):
         sharpe_str = f"{sharpe_val:.4f}"
     else:
         sharpe_str = "N/A"
     print(f"  - Sharpe Ratio: {sharpe_str}")
-    weights = list(optimal_info.get('best_weights', []))
-    rules = (optimal_info.get('eq_spans')
-             or optimal_info.get('spans')
-             or optimal_info.get('pairs')
-             or optimal_info.get('horizons')
-             or optimal_info.get('rule_variations'))
+    weights = list(optimal_info.get("best_weights", []))
+    rules = (
+        optimal_info.get("eq_spans")
+        or optimal_info.get("spans")
+        or optimal_info.get("pairs")
+        or optimal_info.get("horizons")
+        or optimal_info.get("rule_variations")
+    )
     if rules and weights:
         print("  - Optimal Weights:")
         for rule, weight in zip(rules, weights):
@@ -2754,41 +3215,62 @@ def plot_final_results(backtest_runner: CarverBacktest, optimized_params: dict, 
 
     # 4. Create the plot
     fig = make_subplots(
-        rows=2, cols=1,
+        rows=2,
+        cols=1,
         shared_xaxes=True,
         vertical_spacing=0.1,
         subplot_titles=(f"Cumulative PnL for {ticker}", "Forecast Signal vs. Price"),
-        specs=[[{"secondary_y": False}], [{"secondary_y": True}]]
+        specs=[[{"secondary_y": False}], [{"secondary_y": True}]],
     )
 
     # Plot 1: Cumulative PnL
     cumulative_pnl = ticker_pnl.cumsum()
     fig.add_trace(
-        go.Scatter(x=cumulative_pnl.index, y=cumulative_pnl, name="Cumulative PnL", line=dict(color='purple')),
-        row=1, col=1
+        go.Scatter(
+            x=cumulative_pnl.index,
+            y=cumulative_pnl,
+            name="Cumulative PnL",
+            line=dict(color="purple"),
+        ),
+        row=1,
+        col=1,
     )
 
     # Plot 2: Signal and Price
     fig.add_trace(
-        go.Scatter(x=ticker_signal.index, y=ticker_signal, name="Forecast Signal", line=dict(color='orange')),
-        row=2, col=1, secondary_y=False
+        go.Scatter(
+            x=ticker_signal.index,
+            y=ticker_signal,
+            name="Forecast Signal",
+            line=dict(color="orange"),
+        ),
+        row=2,
+        col=1,
+        secondary_y=False,
     )
     fig.add_trace(
-        go.Scatter(x=ticker_price.index, y=ticker_price, name="Price", line=dict(color='blue', width=1)),
-        row=2, col=1, secondary_y=True
+        go.Scatter(
+            x=ticker_price.index,
+            y=ticker_price,
+            name="Price",
+            line=dict(color="blue", width=1),
+        ),
+        row=2,
+        col=1,
+        secondary_y=True,
     )
 
     # Style the plot
     fig.update_layout(
         title_text=f"Backtest Results for {ticker} ({backtest_runner.strategy_type})",
         height=700,
-        template='plotly_white',
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     fig.update_yaxes(title_text="Cumulative PnL ($)", row=1, col=1)
     fig.update_yaxes(title_text="Forecast Strength", row=2, col=1, secondary_y=False)
     fig.update_yaxes(title_text="Price", row=2, col=1, secondary_y=True)
-    
+
     fig.show()
 
 
@@ -2805,7 +3287,7 @@ def prepare_trade_actions_from_signal(
     action_open:  1 = open long (signal crosses up through 0)
                   -1 = open short (signal crosses down through 0)
     action_close: -2 = close long,  +2 = close short
-                  (if positions provided, closes come from position → flat;
+                  (if positions provided, closes come from position -> flat;
                    else from signal crossing back through 0)
     action_single: a single compatibility column combining both
                    (close codes take precedence if both happen same bar)
@@ -2814,7 +3296,7 @@ def prepare_trade_actions_from_signal(
     prev_s = s.shift(1).fillna(0.0)
 
     # Opens come from zero-crossings of the signal
-    open_long  = (s > 0) & (prev_s <= 0)
+    open_long = (s > 0) & (prev_s <= 0)
     open_short = (s < 0) & (prev_s >= 0)
 
     action_open = pd.Series(0, index=s.index, dtype=int)
@@ -2824,27 +3306,27 @@ def prepare_trade_actions_from_signal(
     # Closes: prefer actual positions if you have them (reflects buffering, deadband, etc.)
     action_close = pd.Series(0, index=s.index, dtype=int)
     if positions is not None:
-        pos_now  = np.sign(pd.Series(positions, copy=False).fillna(0.0))
+        pos_now = np.sign(pd.Series(positions, copy=False).fillna(0.0))
         pos_prev = pos_now.shift(1).fillna(0.0)
 
-        close_long  = (pos_prev > 0) & (pos_now <= 0)
+        close_long = (pos_prev > 0) & (pos_now <= 0)
         close_short = (pos_prev < 0) & (pos_now >= 0)
 
-        action_close.loc[close_long]  = -2
-        action_close.loc[close_short] =  2
+        action_close.loc[close_long] = -2
+        action_close.loc[close_short] = 2
     else:
         # Fallback: define closes from signal crossing back through 0
-        close_long  = (prev_s > 0) & (s <= 0)
+        close_long = (prev_s > 0) & (s <= 0)
         close_short = (prev_s < 0) & (s >= 0)
-        action_close.loc[close_long]  = -2
-        action_close.loc[close_short] =  2
+        action_close.loc[close_long] = -2
+        action_close.loc[close_short] = 2
 
     # Single compatibility column (close takes precedence if both occur on same bar)
     action_single = pd.Series(0, index=s.index, dtype=int)
     mask_close = action_close != 0
-    mask_open  = (action_open != 0) & ~mask_close
+    mask_open = (action_open != 0) & ~mask_close
     action_single.loc[mask_close] = action_close.loc[mask_close]
-    action_single.loc[mask_open]  = action_open.loc[mask_open]
+    action_single.loc[mask_open] = action_open.loc[mask_open]
 
     return action_open, action_close, action_single
 
@@ -2864,30 +3346,58 @@ def plot_signals_and_trades_v2(
     fig = go.Figure()
 
     # Price (left y) and signal (right y)
-    fig.add_trace(go.Scatter(x=data.index, y=data[price_col],
-                             mode="lines", name=price_col))
-    fig.add_trace(go.Scatter(x=data.index, y=data[signal_col],
-                             mode="lines", name=signal_col, yaxis="y2"))
+    fig.add_trace(
+        go.Scatter(x=data.index, y=data[price_col], mode="lines", name=price_col)
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=data.index, y=data[signal_col], mode="lines", name=signal_col, yaxis="y2"
+        )
+    )
 
     # Open markers from signal zero-crossings
-    open_long  = data[data[open_action_col] ==  1]
+    open_long = data[data[open_action_col] == 1]
     open_short = data[data[open_action_col] == -1]
-    fig.add_trace(go.Scatter(x=open_long.index,  y=open_long[price_col],
-                             mode="markers", marker=dict(color="green", size=10, symbol="triangle-up"),
-                             name="Buy (open long)"))
-    fig.add_trace(go.Scatter(x=open_short.index, y=open_short[price_col],
-                             mode="markers", marker=dict(color="red", size=10, symbol="triangle-down"),
-                             name="Sell (open short)"))
+    fig.add_trace(
+        go.Scatter(
+            x=open_long.index,
+            y=open_long[price_col],
+            mode="markers",
+            marker=dict(color="green", size=10, symbol="triangle-up"),
+            name="Buy (open long)",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=open_short.index,
+            y=open_short[price_col],
+            mode="markers",
+            marker=dict(color="red", size=10, symbol="triangle-down"),
+            name="Sell (open short)",
+        )
+    )
 
-    # Close markers (from positions → flat if provided)
-    close_long  = data[data[close_action_col] == -2]
-    close_short = data[data[close_action_col] ==  2]
-    fig.add_trace(go.Scatter(x=close_long.index,  y=close_long[price_col],
-                             mode="markers", marker=dict(color="black", size=8, symbol="x"),
-                             name="Close Long"))
-    fig.add_trace(go.Scatter(x=close_short.index, y=close_short[price_col],
-                             mode="markers", marker=dict(color="purple", size=8, symbol="x"),
-                             name="Close Short"))
+    # Close markers (from positions -> flat if provided)
+    close_long = data[data[close_action_col] == -2]
+    close_short = data[data[close_action_col] == 2]
+    fig.add_trace(
+        go.Scatter(
+            x=close_long.index,
+            y=close_long[price_col],
+            mode="markers",
+            marker=dict(color="black", size=8, symbol="x"),
+            name="Close Long",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=close_short.index,
+            y=close_short[price_col],
+            mode="markers",
+            marker=dict(color="purple", size=8, symbol="x"),
+            name="Close Short",
+        )
+    )
 
     fig.update_layout(
         title=f"Trade Signals vs. Price {title_suffix}",
@@ -2895,7 +3405,9 @@ def plot_signals_and_trades_v2(
         yaxis=dict(title=price_col),
         yaxis2=dict(title=signal_col, overlaying="y", side="right"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        width=1300, height=600, template="plotly_white",
+        width=1300,
+        height=600,
+        template="plotly_white",
     )
     fig.show()
 
@@ -2909,18 +3421,43 @@ def plot_trading_performance(performance_df: pd.DataFrame, abs_dd: bool = True):
     if abs_dd:
         perf["drawdown"] = perf["equity_curve"] - perf["equity_curve"].cummax()
     else:
-        perf["drawdown"] = (perf["equity_curve"] - perf["equity_curve"].cummax()) / perf["equity_curve"].cummax()
+        perf["drawdown"] = (
+            perf["equity_curve"] - perf["equity_curve"].cummax()
+        ) / perf["equity_curve"].cummax()
 
     fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+        rows=4,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
         subplot_titles=("Equity Curve", "Drawdown", "Daily PnL", "PnL Distribution"),
     )
-    fig.add_trace(go.Scatter(x=perf.index, y=perf["equity_curve"], mode="lines", name="Equity Curve"), row=1, col=1)
-    fig.add_trace(go.Bar(x=perf.index, y=perf["drawdown"], name="Drawdown"), row=2, col=1)
-    fig.add_trace(go.Bar(x=perf.index, y=perf["daily_pnl"], name="Daily PnL"), row=3, col=1)
-    fig.add_trace(go.Histogram(x=perf["daily_pnl"], name="PnL Distribution", nbinsx=100), row=4, col=1)
+    fig.add_trace(
+        go.Scatter(
+            x=perf.index, y=perf["equity_curve"], mode="lines", name="Equity Curve"
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Bar(x=perf.index, y=perf["drawdown"], name="Drawdown"), row=2, col=1
+    )
+    fig.add_trace(
+        go.Bar(x=perf.index, y=perf["daily_pnl"], name="Daily PnL"), row=3, col=1
+    )
+    fig.add_trace(
+        go.Histogram(x=perf["daily_pnl"], name="PnL Distribution", nbinsx=100),
+        row=4,
+        col=1,
+    )
 
-    fig.update_layout(height=1400, width=1300, title_text="Trading Performance", showlegend=False, template="plotly_white")
+    fig.update_layout(
+        height=1400,
+        width=1300,
+        title_text="Trading Performance",
+        showlegend=False,
+        template="plotly_white",
+    )
     fig.show()
 
 
@@ -2935,9 +3472,9 @@ def plot_detailed_backtest_analytics(backtest_runner, ticker: str):
     Positions are pulled from `backtest_runner.position_dict` when available or from
     `backtest_runner.pnl_dict[ticker]['positions']` as a fallback.
     """
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print(f"### Generating Detailed Analytics for Ticker: {ticker} ###")
-    print("="*50)
+    print("=" * 50)
 
     pnl_store = getattr(backtest_runner, "pnl_dict", None) or {}
     signal_store = getattr(backtest_runner, "signal_dict", None) or {}
@@ -2960,16 +3497,25 @@ def plot_detailed_backtest_analytics(backtest_runner, ticker: str):
 
     price = pd.Series(backtest_runner.price_frame[ticker], copy=False).astype(float)
     idx = price.index
-    signal = pd.Series(signal_store[ticker], copy=False).reindex(idx).astype(float).fillna(0.0)
-    positions = pd.Series(position_series, copy=False).reindex(idx).astype(float).fillna(0.0)
+    signal = (
+        pd.Series(signal_store[ticker], copy=False)
+        .reindex(idx)
+        .astype(float)
+        .fillna(0.0)
+    )
+    positions = (
+        pd.Series(position_series, copy=False).reindex(idx).astype(float).fillna(0.0)
+    )
     pnl = pd.Series(pnl_series, copy=False).reindex(idx).astype(float).fillna(0.0)
 
-    df = pd.DataFrame({
-        "price": price,
-        "signal": signal,
-        "position": positions,
-        "daily_pnl": pnl,
-    }).dropna(subset=["price"])
+    df = pd.DataFrame(
+        {
+            "price": price,
+            "signal": signal,
+            "position": positions,
+            "daily_pnl": pnl,
+        }
+    ).dropna(subset=["price"])
 
     if df.empty:
         print("Error: no overlapping data to plot for this ticker.")
@@ -2997,6 +3543,7 @@ def plot_detailed_backtest_analytics(backtest_runner, ticker: str):
     print("\nDisplaying trading performance plot...")
     plot_trading_performance(df, abs_dd=True)
 
+
 def estimate_periods_per_year(index: pd.Index) -> float:
     """Estimate the number of observations per year from a datetime index."""
     if not isinstance(index, pd.DatetimeIndex) or index.size < 2:
@@ -3011,8 +3558,6 @@ def estimate_periods_per_year(index: pd.Index) -> float:
         return float(BUSDAYS)
 
     return float(365.25 / avg_days)
-
-
 
 
 def carver_backtest_stats(
@@ -3030,16 +3575,27 @@ def carver_backtest_stats(
     """
     pnl = pd.Series(pnl_ccy).astype(float).dropna()
     if pnl.empty:
-        return {k: np.nan for k in [
-            "mean_ann_return","ann_costs","avg_drawdown","ann_std",
-            "sharpe","turnover_pa","skew","lower_tail","upper_tail"]}
+        return {
+            k: np.nan
+            for k in [
+                "mean_ann_return",
+                "ann_costs",
+                "avg_drawdown",
+                "ann_std",
+                "sharpe",
+                "turnover_pa",
+                "skew",
+                "lower_tail",
+                "upper_tail",
+            ]
+        }
 
     rets = pnl / float(capital)
     ppy = periods_per_year or estimate_periods_per_year(pnl.index)
 
     mean_ann_return = rets.mean() * ppy
-    ann_std         = rets.std(ddof=0) * np.sqrt(ppy)
-    sharpe          = mean_ann_return / ann_std if ann_std > 0 else np.nan
+    ann_std = rets.std(ddof=0) * np.sqrt(ppy)
+    sharpe = mean_ann_return / ann_std if ann_std > 0 else np.nan
 
     # Drawdown on equity (constant capital base)
     equity = capital + pnl.cumsum()
@@ -3053,7 +3609,7 @@ def carver_backtest_stats(
     else:
         ann_costs = np.nan
 
-    # Turnover: average |Δ position| per period, annualised
+    # Turnover: average |Delta position| per period, annualised
     turnover_pa = np.nan
     if position is not None:
         pos = pd.Series(position).reindex(pnl.index).fillna(0.0)
@@ -3067,14 +3623,14 @@ def carver_backtest_stats(
 
     return {
         "mean_ann_return": float(mean_ann_return),
-        "ann_costs":       float(ann_costs) if np.isfinite(ann_costs) else np.nan,
-        "avg_drawdown":    float(avg_drawdown),
-        "ann_std":         float(ann_std),
-        "sharpe":          float(sharpe) if np.isfinite(sharpe) else np.nan,
-        "turnover_pa":     float(turnover_pa) if np.isfinite(turnover_pa) else np.nan,
-        "skew":            float(skew) if np.isfinite(skew) else np.nan,
-        "lower_tail":      float(lower_tail),
-        "upper_tail":      float(upper_tail),
+        "ann_costs": float(ann_costs) if np.isfinite(ann_costs) else np.nan,
+        "avg_drawdown": float(avg_drawdown),
+        "ann_std": float(ann_std),
+        "sharpe": float(sharpe) if np.isfinite(sharpe) else np.nan,
+        "turnover_pa": float(turnover_pa) if np.isfinite(turnover_pa) else np.nan,
+        "skew": float(skew) if np.isfinite(skew) else np.nan,
+        "lower_tail": float(lower_tail),
+        "upper_tail": float(upper_tail),
     }
 
 
