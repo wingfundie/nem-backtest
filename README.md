@@ -1,4 +1,4 @@
-# NEM Mean Reversion Trial
+# NEM Mean Reversion Backtest
 
 ## Overview
 This workspace explores mean-reversion strategies for Australian National Electricity Market (NEM) spot prices. The core idea is to recreate a Rob Carver style process: build forecast variants, normalise and cap them, search for robust weightings, and size positions with volatility targeting before measuring risk-adjusted returns.
@@ -43,3 +43,4 @@ Python >= 3.10 with `pandas`, `numpy`, `plotly`, `optuna`, and supporting scient
 - Swap in alternative spans or add new rule families to challenge the optimiser.
 - Extend the cost model (e.g. tick-size aware slippage) before taking signals live.
 - Automate data refresh and run scheduling so the research notebook can double as a nightly report.
+
