@@ -10,7 +10,7 @@ This workspace explores mean-reversion strategies for Australian National Electr
 - `results.md` summarises the headline performance pulled from the notebook so you can review outcomes without opening the `.ipynb`.
 
 ## Backtester highlights
-- **Strategy coverage**: Supports breakout, EWMA crossover, accelerated EWMAC, and the mean-reversion variants used here (`meanrev_eq` and `meanrev_trend_vol`).
+- **Strategy coverage**: Supports mean-reversion variants used here (`meanrev_eq` and `meanrev_trend_vol`).
 - **Optuna integration**: `CarverBacktest.run_optimization` spins up Optuna studies per ticker to solve for non-negative rule weights subject to Carver capping.
 - **Risk & costs**: Volatility targeting (default 20% annualised) and optional buffers, commissions, and spreads can be supplied via maps to keep each instrument consistent.
 - **Extensibility**: You can inject your own forecast functions by exposing them in a `portfolio_strategy` module or passing callables into the constructor.
@@ -43,4 +43,5 @@ Python >= 3.10 with `pandas`, `numpy`, `plotly`, `optuna`, and supporting scient
 - Swap in alternative spans or add new rule families to challenge the optimiser.
 - Extend the cost model (e.g. tick-size aware slippage) before taking signals live.
 - Automate data refresh and run scheduling so the research notebook can double as a nightly report.
+
 
